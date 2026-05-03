@@ -127,7 +127,7 @@ Also add these to your printer profile's Machine G-code if they aren't there:
 M118 P0 A1 action:print_start
 
 ; End G-code
-M118 P0 A1 action:print_end
+M118 P0 A1 action:cancel
 
 ; Pause G-code
 M0
@@ -135,6 +135,15 @@ M0
 ; Layer change G-code
 M118 P0 A1 action:notification Layer Left [layer_num]/[total_layer_count]
 ```
+
+> **Why `action:cancel` and not `action:print_end`?**
+> When streaming from a host (no SD card involved), `action:print_end` triggers a
+> "No SD card" popup on most BTT TFT firmware versions — the print-end code path
+> tries to close an SD file that doesn't exist. `action:cancel` exits the printing
+> screen cleanly; the only cosmetic downside is a brief "Print Aborted"
+> notification. The print completed normally — the TFT just labels the screen-exit
+> that way. If you find a firmware version where `action:print_end` works without
+> the popup, [open an issue](../../issues).
 
 See [docs/slicer-setup.md](docs/slicer-setup.md) for a step-by-step walkthrough
 with screenshots for both Orca Slicer and PrusaSlicer.
