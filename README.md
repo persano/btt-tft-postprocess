@@ -200,11 +200,10 @@ Output: `dist\btt_postprocess.exe` (~15 MB, no Python required to run).
 
 ## Credits
 
-The thumbnail conversion approach reimplements the logic from BIQU/BIGTREETECH's
-`biqu_convert_p24.py`, part of the
-[BIGTREETECH-TouchScreenFirmware](https://github.com/bigtreetech/BIGTREETECH-TouchScreenFirmware)
-project. This script uses Pillow instead of PyQt5, which produces a smaller
-executable and removes the Qt dependency.
+The thumbnail conversion approach reimplements the logic from a script shared in
+[BIGTREETECH-TouchScreenFirmware issue #1238](https://github.com/bigtreetech/BIGTREETECH-TouchScreenFirmware/issues/1238#issuecomment-728333398)
+by the BIQU/BIGTREETECH community. The original used PyQt5; this script uses
+Pillow instead, which produces a smaller executable and removes the Qt dependency.
 
 ---
 
