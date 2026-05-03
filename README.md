@@ -59,22 +59,25 @@ Re-slice any file. Orca shows a log after slicing — you should see a line like
 
 ---
 
-## Install — Python script
+## Install — Python script (no .exe needed)
 
 If you'd rather run the source directly:
 
-1. Install Python 3.10+ (tick "Add to PATH" during setup).
-2. `pip install Pillow`
-3. In Orca: **Print Settings → Others → Post-processing scripts**:
+1. Download `btt_postprocess.py` from the
+   [Releases page](../../releases/latest) (or copy it from `src/` in this repo).
+2. Save it anywhere permanent, e.g. `C:\Tools\btt_postprocess.py`.
+3. Install Python 3.10+ (tick "Add to PATH" during setup) and run
+   `pip install Pillow`.
+4. In Orca: **Print Settings → Others → Post-processing scripts**:
 
    Windows:
    ```
-   "C:\Python314\python.exe" "C:\path\to\src\btt_postprocess.py";
+   "C:\Python314\python.exe" "C:\Tools\btt_postprocess.py";
    ```
 
    macOS / Linux:
    ```
-   /usr/bin/env python3 "/path/to/src/btt_postprocess.py";
+   /usr/bin/env python3 "/path/to/btt_postprocess.py";
    ```
 
 Or install as a CLI tool:
