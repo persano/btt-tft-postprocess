@@ -11,8 +11,9 @@ injecting the host-action commands directly into the sliced gcode file. The
 TFT picks them up off the serial wire regardless of which host is streaming,
 so you get the full printing screen without touching the host at all.
 
-*[Screenshots placeholder — TFT idle screen vs. printing screen with thumbnail
-and progress bar. Add to `docs/screenshots/` and link here.]*
+| Thumbnail | Progress % | Time left | Layers |
+|:---------:|:----------:|:---------:|:------:|
+| ![Thumbnail on TFT](docs/screenshots/thumbnails.jpeg) | ![Percentage remaining](docs/screenshots/percentage-remaining.jpeg) | ![Minutes remaining](docs/screenshots/minutes-remaining.jpeg) | ![Layers remaining](docs/screenshots/layers-remaining.jpeg) |
 
 ---
 
