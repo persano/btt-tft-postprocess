@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Configuration:
+
+- `M155_INTERVAL_SECONDS = 0` now skips M155 injection entirely
+  (previously always injected). Useful if you want Marlin's default 5s
+  reporting back.
+- README rewritten to document all 13 transforms in three categories
+  (TFT support, Beagle/Marlin compatibility, size reduction) plus the
+  user-tunable constants (`M155_INTERVAL_SECONDS`, `THUMBNAIL_SIZES`)
+  and how to disable a whole pass if needed.
+
+
 Notification ordering:
 
 - `move_initial_notifications_after_print_start` reads the percentage

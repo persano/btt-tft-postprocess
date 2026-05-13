@@ -316,6 +316,12 @@ class TestInjectM155Throttle:
         assert result.startswith("M155 S60\n")
         assert "\r\n" not in result
 
+    def test_interval_zero_disables_injection(self):
+        gcode = "G28\r\nG1 X10 E5\r\n"
+        result, count = inject_m155_throttle(gcode, interval_seconds=0)
+        assert count == 0
+        assert result == gcode
+
     def test_skip_if_m155_in_warmup_only(self):
         # M155 in the print body (after first extrusion) shouldn't block
         # injection -- that's a different concern.

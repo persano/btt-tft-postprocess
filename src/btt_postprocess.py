@@ -320,7 +320,8 @@ def strip_m115_queries(text: str) -> tuple[str, int]:
 # Default interval (seconds) for M155 auto-temperature reports. Marlin's
 # built-in default is 5s; raising this cuts serial traffic ~6x and helps
 # serial-proxy hosts (Mintion Beagle) keep up. Adjust here if you want a
-# different rate -- 60 is also reasonable.
+# different rate -- 60 is also reasonable. Set to 0 to disable injection
+# entirely (your printer will keep Marlin's default 5s reporting).
 M155_INTERVAL_SECONDS = 30
 
 _M155_RE = re.compile(r"^\s*M155\b", re.IGNORECASE)
@@ -332,10 +333,14 @@ def inject_m155_throttle(
     """
     Insert an `M155 S<interval_seconds>` line just before the first
     executable command. If the file already has an M155 anywhere in the
-    warmup region (user is managing this themselves), do nothing.
+    warmup region (user is managing this themselves), do nothing. Pass
+    `interval_seconds=0` to disable injection entirely.
 
     Returns (new_text, 1) if a line was inserted, otherwise (text, 0).
     """
+    if interval_seconds <= 0:
+        return text, 0
+
     lines = text.splitlines(keepends=True)
     first_exec_idx: int | None = None
 
