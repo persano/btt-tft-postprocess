@@ -209,7 +209,7 @@ def build_thumbnail_header(gcode_text: str) -> str:
     parts: list[str] = []
     for w, h in THUMBNAIL_SIZES:
         parts.append(render_thumbnail_block(img, w, h))
-    parts.append("; bigtree thumbnail end\r\n")
+    parts.append(";bigtree thumbnail end\r\n")
     return "".join(parts)
 
 
@@ -775,6 +775,37 @@ def minify_float_coordinates(text: str) -> tuple[str, int]:
     return "".join(output), modified
 
 
+# Strip the space/tab(s) some slicers put immediately after `;` on
+# comment lines. Marlin and BTT TFT firmware both treat `; foo` and
+# `;foo` identically, so the gap is pure overhead.
+_COMMENT_LEADING_WS_RE = re.compile(r"^;[ \t]+")
+
+
+def strip_comment_leading_whitespace(text: str) -> tuple[str, int]:
+    """
+    Remove the leading space/tab(s) immediately after `;` on comment
+    lines: `; UBL - load mesh` -> `;UBL - load mesh`. Saves one byte per
+    affected comment. No effect on bare `;` lines (no whitespace to
+    remove) or on non-comment lines.
+
+    Returns (new_text, lines_modified).
+    """
+    output: list[str] = []
+    modified = 0
+    for line in text.splitlines(keepends=True):
+        if not line.startswith(";"):
+            output.append(line)
+            continue
+        match = _COMMENT_LEADING_WS_RE.match(line)
+        if not match:
+            output.append(line)
+            continue
+        new_line = ";" + line[match.end():]
+        modified += 1
+        output.append(new_line)
+    return "".join(output), modified
+
+
 def strip_trailing_whitespace(text: str) -> tuple[str, int]:
     """
     Trim trailing whitespace (spaces/tabs) from every line, preserving
@@ -876,6 +907,7 @@ def process_gcode(path: Path) -> None:
     new_text, feature_cmts_stripped = strip_slicer_feature_comments(new_text)
     new_text, inline_cmts_stripped = strip_inline_command_comments(new_text)
     new_text, minified_lines = minify_float_coordinates(new_text)
+    new_text, cmt_ws_stripped = strip_comment_leading_whitespace(new_text)
     new_text, ws_trimmed = strip_trailing_whitespace(new_text)
     new_text, blanks_collapsed = collapse_blank_lines(new_text)
 
@@ -898,7 +930,7 @@ def process_gcode(path: Path) -> None:
           f"init_notif={init_notif_moved} end_notif={end_notif_moved} "
           f"png={png_blocks_stripped} cfg={config_block_dropped} "
           f"feat={feature_cmts_stripped} inline={inline_cmts_stripped} "
-          f"minify={minified_lines} ws={ws_trimmed} "
+          f"minify={minified_lines} cmt_ws={cmt_ws_stripped} ws={ws_trimmed} "
           f"blanks={blanks_collapsed} prior_btt={prior_btt_dropped} "
           f"size={original_size}->{final_size} ({delta_pct:+.1f}%)")
 

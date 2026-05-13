@@ -26,6 +26,10 @@ Whitespace cleanup:
   a blank line, which is why every BTT thumbnail row and every injected
   M118 pair appeared to have a blank line after it. Reads now also heal
   any existing `\r\r\n` damage from files produced by the buggy version.
+- `strip_comment_leading_whitespace` removes the leading space/tab after
+  `;` on comment lines: `; foo` -> `;foo`. Saves a byte per comment line
+  (~100 per long Orca slice). The BTT thumbnail terminator is also
+  emitted in the no-space form (`;bigtree thumbnail end`).
 - `strip_trailing_whitespace` trims trailing spaces/tabs from every line.
 - `strip_slicer_feature_comments` now also drops bare `;` lines that
   Orca emits as visual spacers between metadata sections.

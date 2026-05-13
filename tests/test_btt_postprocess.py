@@ -13,6 +13,7 @@ from btt_postprocess import (
     move_final_notifications_before_print_end,
     move_initial_notifications_after_print_start,
     rgb_to_rgb565_hex,
+    strip_comment_leading_whitespace,
     strip_existing_btt_thumbnail,
     strip_inline_command_comments,
     strip_m115_queries,
@@ -828,6 +829,66 @@ class TestNewlineRoundTrip:
 
         raw = gcode.read_bytes()
         assert b"\r\r\n" not in raw
+
+
+class TestStripCommentLeadingWhitespace:
+    def test_strips_single_space(self):
+        gcode = "; UBL - load and activate saved mesh\r\nG28\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 1
+        assert result == ";UBL - load and activate saved mesh\r\nG28\r\n"
+
+    def test_strips_multiple_spaces(self):
+        gcode = ";   indented comment\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 1
+        assert result == ";indented comment\r\n"
+
+    def test_strips_tab(self):
+        gcode = ";\tindented with tab\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 1
+        assert result == ";indented with tab\r\n"
+
+    def test_strips_bigtree_thumbnail_end_marker(self):
+        # The (legacy) form had a leading space; verify we collapse it
+        # so older files normalize on re-processing.
+        gcode = "; bigtree thumbnail end\r\nG28\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 1
+        assert ";bigtree thumbnail end\r\n" in result
+
+    def test_no_space_unchanged(self):
+        gcode = ";LAYER_CHANGE\r\n;LAYER:5\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_does_not_touch_g_m_lines(self):
+        gcode = "G1 X10\r\nM104 S220\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_handles_lf_endings(self):
+        gcode = "; foo\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 1
+        assert result == ";foo\n"
+
+    def test_bare_semicolon_untouched(self):
+        # No leading whitespace to remove.
+        gcode = ";\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_btt_thumbnail_pixel_rows_unchanged(self):
+        # Pixel rows are `;0000...` -- no leading whitespace.
+        gcode = ";00460046\r\n;0000ffffaaaa\r\n"
+        result, count = strip_comment_leading_whitespace(gcode)
+        assert count == 0
+        assert result == gcode
 
 
 class TestStripTrailingWhitespace:
