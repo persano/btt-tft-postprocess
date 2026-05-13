@@ -793,6 +793,92 @@ class TestMoveFinalNotificationsBeforePrintEnd:
         assert result.count("action:notification") == 2  # only the two we inserted
 
 
+class TestConfigToggles:
+    """Spot-check that ENABLE_* toggles in process_gcode actually gate
+    the corresponding pass. We test a representative pass from each
+    category rather than all 12 -- the gating pattern is identical."""
+
+    def _run(self, monkeypatch, gcode_bytes, **toggles):
+        import btt_postprocess
+        for name, value in toggles.items():
+            monkeypatch.setattr(btt_postprocess, name, value)
+        return gcode_bytes
+
+    def test_disable_strip_m115(self, monkeypatch, tmp_path):
+        import btt_postprocess
+        monkeypatch.setattr(btt_postprocess, "ENABLE_STRIP_M115", False)
+        gcode = tmp_path / "test.gcode"
+        gcode.write_bytes(b"M115\r\nG28\r\n")
+        btt_postprocess.process_gcode(gcode)
+        # Without the strip, M115 survives.
+        assert b"M115" in gcode.read_bytes()
+
+    def test_disable_m104_to_m109_fix(self, monkeypatch, tmp_path):
+        import btt_postprocess
+        monkeypatch.setattr(
+            btt_postprocess, "ENABLE_M104_TO_M109_WARMUP_FIX", False,
+        )
+        gcode = tmp_path / "test.gcode"
+        # Classic case: M104 with no following M109, then extrusion.
+        gcode.write_bytes(
+            b"M140 S60\r\nM190 S60\r\nM104 S220\r\nG28\r\n"
+            b"G1 X10 E5\r\n"
+        )
+        btt_postprocess.process_gcode(gcode)
+        raw = gcode.read_bytes()
+        # Without the fix, the M104 line should NOT have been rewritten.
+        assert b"M104 S220" in raw
+        assert b"M109 S220" not in raw
+
+    def test_disable_strip_config_block(self, monkeypatch, tmp_path):
+        import btt_postprocess
+        monkeypatch.setattr(btt_postprocess, "ENABLE_STRIP_CONFIG_BLOCK", False)
+        gcode = tmp_path / "test.gcode"
+        gcode.write_bytes(
+            b"G28\r\n; CONFIG_BLOCK_START\r\n; foo = 1\r\n"
+            b"; CONFIG_BLOCK_END\r\n"
+        )
+        btt_postprocess.process_gcode(gcode)
+        raw = gcode.read_bytes()
+        assert b"CONFIG_BLOCK_START" in raw
+        assert b"foo = 1" in raw
+
+    def test_disable_collapse_blank_lines(self, monkeypatch, tmp_path):
+        import btt_postprocess
+        monkeypatch.setattr(btt_postprocess, "ENABLE_COLLAPSE_BLANK_LINES", False)
+        # Also disable other strippers that would remove the content we
+        # care about, so this test isolates the blank-line behavior.
+        monkeypatch.setattr(btt_postprocess, "ENABLE_STRIP_TRAILING_WS", False)
+        gcode = tmp_path / "test.gcode"
+        gcode.write_bytes(b"G28\r\n\r\nG1 X10\r\n")
+        btt_postprocess.process_gcode(gcode)
+        raw = gcode.read_bytes()
+        # Blank line survives.
+        assert b"\r\n\r\n" in raw
+
+    def test_disable_reorder_final_notifications(self, monkeypatch, tmp_path):
+        import btt_postprocess
+        monkeypatch.setattr(
+            btt_postprocess, "ENABLE_REORDER_FINAL_NOTIFICATIONS", False,
+        )
+        gcode = tmp_path / "test.gcode"
+        gcode.write_bytes(
+            b"M84\r\nM118 P0 A1 action:print_end\r\n"
+            b"M73 P100 R0\r\n"
+        )
+        btt_postprocess.process_gcode(gcode)
+        raw = gcode.read_bytes().decode()
+        # Without reorder, print_end stays in its original position --
+        # the synthetic final notification pair is NOT inserted before it.
+        # (m73 idempotency still skips its own injection, leaving the
+        # post-end M73 P100 untouched.)
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        # First line after the BTT-thumbnail prepend (if any) should still
+        # be M84 -- no Time Left / Data Left inserted before print_end.
+        idx = next(i for i, ln in enumerate(lines) if "action:print_end" in ln)
+        assert "action:notification" not in lines[idx - 1]
+
+
 class TestNewlineRoundTrip:
     """Round-trip a file through process_gcode and confirm line endings
     stay clean. Prior versions produced CRCRLF on disk because of Windows

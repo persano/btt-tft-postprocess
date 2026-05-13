@@ -148,19 +148,49 @@ The passes group into three categories:
 
 ## Configuration
 
-Two constants at the top of [`src/btt_postprocess.py`](src/btt_postprocess.py)
-cover the customisations most people want. Edit, rebuild the `.exe` (or
-run the `.py` directly), and you're set.
+Every optional pass has a toggle at the top of
+[`src/btt_postprocess.py`](src/btt_postprocess.py). All default to **on**.
+Flip any flag to `False` and rebuild the `.exe` (or run the `.py`
+directly) to opt out.
+
+Two transforms are always-on because the script has no reason to exist
+without them: the BTT thumbnail conversion (turn off thumbnails in the
+slicer instead) and the M73 → M118 progress notifications. The newline /
+CRCRLF handling is also always-on — it's a correctness fix.
+
+### Beagle / Marlin compatibility
 
 | Constant | Default | Effect |
 |---|---|---|
-| `M155_INTERVAL_SECONDS` | `30` | Seconds between Marlin's auto temperature reports. Lower = faster updates in the Beagle app, more serial traffic. Higher = less traffic but slower temp display. Set to `0` to skip injection entirely (your printer keeps Marlin's 5s default). |
-| `THUMBNAIL_SIZES` | `[(70,70), (95,80), (95,95), (160,140)]` | The sizes the script generates and the BTT firmware looks for. Don't change unless you know your firmware expects a different set. |
+| `ENABLE_STRIP_M115` | `True` | Strip `M115` firmware-info queries. Disable if you actually want their response for some reason. |
+| `ENABLE_M104_TO_M109_WARMUP_FIX` | `True` | Upgrade the final pre-print `M104 S>0` to `M109` when the slicer's auto-header forgot to wait. Disable if your start gcode handles waits itself and you'd rather the script not touch them. |
+| `M155_INTERVAL_SECONDS` | `30` | Seconds between Marlin's auto temperature reports. Lower = faster temp updates in the Beagle app, more serial traffic. Higher = less traffic, slower display. Set to `0` to skip injection entirely (printer keeps Marlin's 5s default). |
 
-If you want to disable a whole pass (e.g. keep the Orca config block for
-"reload with config"), the simplest approach is to comment out the
-corresponding line in `process_gcode()` — every pass is one line and
-returns the unchanged text if it has nothing to do.
+### TFT notification ordering
+
+| Constant | Default | Effect |
+|---|---|---|
+| `ENABLE_REORDER_INIT_NOTIFICATIONS` | `True` | Move the initial 0% / total-time notification pair to immediately AFTER `action:print_start` so the TFT can see it. Disable if your start gcode uses a different action and you don't want any reordering. |
+| `ENABLE_REORDER_FINAL_NOTIFICATIONS` | `True` | Move the final 100% / 00:00 pair to immediately BEFORE `action:print_end`. Disable if you don't use `action:print_end` in your end gcode. |
+
+### Size reduction
+
+| Constant | Default | Effect | Tradeoff |
+|---|---|---|---|
+| `ENABLE_STRIP_PNG_THUMBNAIL` | `True` | Drop the slicer's base64 PNG block after extraction. | Hosts that read the slicer PNG for previews (some web hosts; Mintion Beagle does NOT) lose their preview. |
+| `ENABLE_STRIP_CONFIG_BLOCK` | `True` | Drop Orca's `; CONFIG_BLOCK_START ... ; CONFIG_BLOCK_END` settings dump. ~30-60 KB savings. | Breaks Orca's "reload with config" feature. |
+| `ENABLE_STRIP_FEATURE_COMMENTS` | `True` | Drop `;TYPE:`, `;WIDTH:`, `;HEIGHT:`, wipe markers, generated-by line, filament info, extrusion-width annotations, Klipper `;_SET_FAN_SPEED` hints, bare `;` separators. `LAYER_CHANGE` / `LAYER_COUNT` are preserved. | Lose human-readable annotations if you ever open the file. |
+| `ENABLE_STRIP_INLINE_COMMENTS` | `True` | Trim `; comment` from the end of G/M lines. `M117`/`M118` messages untouched. | Same as above. |
+| `ENABLE_MINIFY_FLOATS` | `True` | `X100.000` → `X100`, `Z0.20` → `Z0.2`. | None (behavioral no-op). |
+| `ENABLE_STRIP_COMMENT_LEADING_WS` | `True` | `; foo` → `;foo`. | None (firmware doesn't care). |
+| `ENABLE_STRIP_TRAILING_WS` | `True` | Trim trailing spaces/tabs from every line. | None. |
+| `ENABLE_COLLAPSE_BLANK_LINES` | `True` | Drop blank lines. | None. |
+
+### Thumbnail
+
+| Constant | Default | Effect |
+|---|---|---|
+| `THUMBNAIL_SIZES` | `[(70,70), (95,80), (95,95), (160,140)]` | Sizes generated for the BTT TFT firmware. Don't change unless you know your firmware expects a different set. |
 
 ---
 

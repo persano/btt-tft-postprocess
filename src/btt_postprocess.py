@@ -99,6 +99,78 @@ except ImportError:
     sys.exit(1)
 
 
+# ===========================================================================
+# CONFIGURATION
+# ===========================================================================
+# Every optional pass below has a boolean toggle. All default to True; flip
+# any of them to False to skip that pass. Two transforms are NOT toggleable
+# because the script wouldn't have a reason to exist without them:
+#   - BTT thumbnail conversion (turn off thumbnails in the slicer instead)
+#   - M73 -> M118 progress notification injection
+# I/O newline handling and CRLF healing are also always on -- they're
+# correctness fixes, not features.
+
+# --- Beagle / Marlin compatibility ---------------------------------------
+ENABLE_STRIP_M115 = True
+# Strip M115 firmware-info queries. Their long response can race with M105
+# polls on hosts that proxy the serial line (Mintion Beagle).
+
+ENABLE_M104_TO_M109_WARMUP_FIX = True
+# Upgrade the final pre-print M104 (set hotend temp, no wait) to M109 (wait)
+# when the slicer's auto-header forgot to. Works around OrcaSlicer #2334 /
+# #4337. No-op when your start gcode already has an M109.
+
+M155_INTERVAL_SECONDS = 30
+# Marlin's auto temp-report interval. Default Marlin behavior is 5s; raising
+# this cuts serial traffic ~6x and helps Beagle keep up. Set to 0 to skip
+# injection entirely (your printer keeps Marlin's 5s default).
+
+# --- TFT notification ordering -------------------------------------------
+ENABLE_REORDER_INIT_NOTIFICATIONS = True
+# Move the initial "0% / total time" pair to immediately AFTER
+# action:print_start (otherwise the TFT can't show them -- the print
+# screen isn't open yet).
+
+ENABLE_REORDER_FINAL_NOTIFICATIONS = True
+# Move the final "100% / 00:00" pair to immediately BEFORE action:print_end
+# (otherwise the TFT dismisses the print screen before they're seen).
+
+# --- Size reduction passes -----------------------------------------------
+ENABLE_STRIP_PNG_THUMBNAIL = True
+# Drop the slicer's base64 PNG block after we've extracted it for the BTT
+# TFT. Disable if you stream the file to an app that displays the slicer
+# thumbnail (some web hosts do; Mintion Beagle does NOT).
+
+ENABLE_STRIP_CONFIG_BLOCK = True
+# Drop Orca's full ; CONFIG_BLOCK_START..END settings dump from the end of
+# the file (~30-60 KB savings). Disable if you rely on Orca's "reload with
+# config" feature.
+
+ENABLE_STRIP_FEATURE_COMMENTS = True
+# Drop slicer feature / file-metadata comments (;TYPE:, ;WIDTH:, ;HEIGHT:,
+# wipe markers, generated-by, filament info, extrusion-width annotations,
+# Klipper _SET_FAN_SPEED hints, bare `;` separators). LAYER_CHANGE /
+# LAYER_COUNT are preserved.
+
+ENABLE_STRIP_INLINE_COMMENTS = True
+# Trim `; comment` from the end of G/M command lines. Comment-only lines
+# and M117/M118 message commands are left alone either way.
+
+ENABLE_MINIFY_FLOATS = True
+# Strip trailing zeros from float parameters on G/M lines (X100.000 ->
+# X100, Z0.20 -> Z0.2). Marlin parses floats so this is a behavioral
+# no-op. Marginal on Orca output (it's already aggressive).
+
+ENABLE_STRIP_COMMENT_LEADING_WS = True
+# Strip the leading space after `;` on comment lines (`; foo` -> `;foo`).
+
+ENABLE_STRIP_TRAILING_WS = True
+# Trim trailing spaces/tabs from every line.
+
+ENABLE_COLLAPSE_BLANK_LINES = True
+# Drop blank/whitespace-only lines.
+
+
 # ---------------------------------------------------------------------------
 # Thumbnail conversion (PNG base64 -> RGB565 hex blocks for BTT TFT)
 # ---------------------------------------------------------------------------
@@ -316,13 +388,6 @@ def strip_m115_queries(text: str) -> tuple[str, int]:
         out.append(line)
     return "".join(out), removed
 
-
-# Default interval (seconds) for M155 auto-temperature reports. Marlin's
-# built-in default is 5s; raising this cuts serial traffic ~6x and helps
-# serial-proxy hosts (Mintion Beagle) keep up. Adjust here if you want a
-# different rate -- 60 is also reasonable. Set to 0 to disable injection
-# entirely (your printer will keep Marlin's default 5s reporting).
-M155_INTERVAL_SECONDS = 30
 
 _M155_RE = re.compile(r"^\s*M155\b", re.IGNORECASE)
 
@@ -899,22 +964,60 @@ def process_gcode(path: Path) -> None:
     thumbnail_header = build_thumbnail_header(text)
 
     new_text = text
-    # Content rewrites first.
+    # Content rewrites first. Each pass is gated by its ENABLE_* flag at the
+    # top of this file; an "off" flag returns (text, 0) without touching the
+    # bytes, so the status counter shows 0 for that pass.
     new_text, m73_count = inject_m73_notifications(new_text)
-    new_text, m115_stripped = strip_m115_queries(new_text)
-    new_text, m104_upgraded = upgrade_final_warmup_m104_to_m109(new_text)
+    new_text, m115_stripped = (
+        strip_m115_queries(new_text)
+        if ENABLE_STRIP_M115 else (new_text, 0)
+    )
+    new_text, m104_upgraded = (
+        upgrade_final_warmup_m104_to_m109(new_text)
+        if ENABLE_M104_TO_M109_WARMUP_FIX else (new_text, 0)
+    )
     new_text, m155_injected = inject_m155_throttle(new_text)
-    new_text, init_notif_moved = move_initial_notifications_after_print_start(new_text)
-    new_text, end_notif_moved = move_final_notifications_before_print_end(new_text)
+    new_text, init_notif_moved = (
+        move_initial_notifications_after_print_start(new_text)
+        if ENABLE_REORDER_INIT_NOTIFICATIONS else (new_text, 0)
+    )
+    new_text, end_notif_moved = (
+        move_final_notifications_before_print_end(new_text)
+        if ENABLE_REORDER_FINAL_NOTIFICATIONS else (new_text, 0)
+    )
     # Size reductions last -- they only remove bytes, never change semantics.
-    new_text, png_blocks_stripped = strip_png_thumbnail_blocks(new_text)
-    new_text, config_block_dropped = strip_slicer_config_block(new_text)
-    new_text, feature_cmts_stripped = strip_slicer_feature_comments(new_text)
-    new_text, inline_cmts_stripped = strip_inline_command_comments(new_text)
-    new_text, minified_lines = minify_float_coordinates(new_text)
-    new_text, cmt_ws_stripped = strip_comment_leading_whitespace(new_text)
-    new_text, ws_trimmed = strip_trailing_whitespace(new_text)
-    new_text, blanks_collapsed = collapse_blank_lines(new_text)
+    new_text, png_blocks_stripped = (
+        strip_png_thumbnail_blocks(new_text)
+        if ENABLE_STRIP_PNG_THUMBNAIL else (new_text, 0)
+    )
+    new_text, config_block_dropped = (
+        strip_slicer_config_block(new_text)
+        if ENABLE_STRIP_CONFIG_BLOCK else (new_text, 0)
+    )
+    new_text, feature_cmts_stripped = (
+        strip_slicer_feature_comments(new_text)
+        if ENABLE_STRIP_FEATURE_COMMENTS else (new_text, 0)
+    )
+    new_text, inline_cmts_stripped = (
+        strip_inline_command_comments(new_text)
+        if ENABLE_STRIP_INLINE_COMMENTS else (new_text, 0)
+    )
+    new_text, minified_lines = (
+        minify_float_coordinates(new_text)
+        if ENABLE_MINIFY_FLOATS else (new_text, 0)
+    )
+    new_text, cmt_ws_stripped = (
+        strip_comment_leading_whitespace(new_text)
+        if ENABLE_STRIP_COMMENT_LEADING_WS else (new_text, 0)
+    )
+    new_text, ws_trimmed = (
+        strip_trailing_whitespace(new_text)
+        if ENABLE_STRIP_TRAILING_WS else (new_text, 0)
+    )
+    new_text, blanks_collapsed = (
+        collapse_blank_lines(new_text)
+        if ENABLE_COLLAPSE_BLANK_LINES else (new_text, 0)
+    )
 
     final_text = thumbnail_header + new_text
     # newline="" again -- write our explicit \r\n line endings to disk as-is

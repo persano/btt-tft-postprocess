@@ -4,13 +4,25 @@
 
 Configuration:
 
-- `M155_INTERVAL_SECONDS = 0` now skips M155 injection entirely
-  (previously always injected). Useful if you want Marlin's default 5s
-  reporting back.
-- README rewritten to document all 13 transforms in three categories
-  (TFT support, Beagle/Marlin compatibility, size reduction) plus the
-  user-tunable constants (`M155_INTERVAL_SECONDS`, `THUMBNAIL_SIZES`)
-  and how to disable a whole pass if needed.
+- Every optional pass is now individually toggleable via a boolean flag
+  at the top of `src/btt_postprocess.py`. All default to `True`:
+  - `ENABLE_STRIP_M115`
+  - `ENABLE_M104_TO_M109_WARMUP_FIX`
+  - `ENABLE_REORDER_INIT_NOTIFICATIONS`
+  - `ENABLE_REORDER_FINAL_NOTIFICATIONS`
+  - `ENABLE_STRIP_PNG_THUMBNAIL`
+  - `ENABLE_STRIP_CONFIG_BLOCK`
+  - `ENABLE_STRIP_FEATURE_COMMENTS`
+  - `ENABLE_STRIP_INLINE_COMMENTS`
+  - `ENABLE_MINIFY_FLOATS`
+  - `ENABLE_STRIP_COMMENT_LEADING_WS`
+  - `ENABLE_STRIP_TRAILING_WS`
+  - `ENABLE_COLLAPSE_BLANK_LINES`
+- `M155_INTERVAL_SECONDS = 0` skips M155 injection entirely.
+- BTT thumbnail conversion and M73 → M118 notifications remain
+  always-on (turn off slicer thumbnails / progress lines to opt out).
+  I/O newline handling and CRCRLF healing are always-on (correctness).
+- README rewritten with a per-flag table, including each flag's tradeoff.
 
 
 Notification ordering:
