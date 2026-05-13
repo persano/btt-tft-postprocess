@@ -122,6 +122,13 @@ ENABLE_M104_TO_M109_WARMUP_FIX = True
 # when the slicer's auto-header forgot to. Works around OrcaSlicer #2334 /
 # #4337. No-op when your start gcode already has an M109.
 
+ENABLE_INJECT_LAYER_COUNT_MARKER = True
+# Emit a `;LAYER_COUNT:N` marker (PrusaSlicer/Cura canonical form) when
+# the file only has Orca's `; total layer number: N` header. BTT TFT
+# firmware and the Mintion Beagle web UI both read ;LAYER_COUNT: for the
+# "X / N Layers" tile; Orca's wording isn't recognized by either, so the
+# total shows as 0 without this. Orca's original line is preserved.
+
 M155_INTERVAL_SECONDS = 30
 # Marlin's auto temp-report interval. Default Marlin behavior is 5s; raising
 # this cuts serial traffic ~6x and helps Beagle keep up. Set to 0 to skip
@@ -430,6 +437,42 @@ def inject_m155_throttle(
     eol = "\r\n" if lines[first_exec_idx].endswith("\r\n") else "\n"
     lines.insert(first_exec_idx, f"M155 S{interval_seconds}{eol}")
     return "".join(lines), 1
+
+
+# Orca writes `; total layer number: 86`. BTT TFT firmware and the
+# Mintion Beagle web UI look for the PrusaSlicer/Cura form
+# `;LAYER_COUNT:86` instead and ignore Orca's wording, so the layer-total
+# tile reads 0 unless we add the canonical marker.
+_TOTAL_LAYER_NUMBER_RE = re.compile(
+    r"^;\s*total\s+layer\s+number\s*:\s*(?P<n>\d+)", re.IGNORECASE,
+)
+_LAYER_COUNT_RE = re.compile(r"^;\s*LAYER_COUNT\s*:\s*\d+", re.IGNORECASE)
+
+
+def inject_layer_count_marker(text: str) -> tuple[str, int]:
+    """
+    Emit a `;LAYER_COUNT:N` marker (PrusaSlicer/Cura canonical form) when
+    the file only has Orca's `; total layer number: N` header. Orca's
+    original line is left in place. No-op if a LAYER_COUNT marker is
+    already present (idempotent on re-runs and on PrusaSlicer files).
+
+    Returns (new_text, 1) if a marker was inserted, otherwise (text, 0).
+    """
+    lines = text.splitlines(keepends=True)
+
+    for line in lines:
+        if _LAYER_COUNT_RE.match(line):
+            return text, 0
+
+    for i, line in enumerate(lines):
+        match = _TOTAL_LAYER_NUMBER_RE.match(line)
+        if not match:
+            continue
+        eol = "\r\n" if line.endswith("\r\n") else "\n"
+        lines.insert(i + 1, f";LAYER_COUNT:{match.group('n')}{eol}")
+        return "".join(lines), 1
+
+    return text, 0
 
 
 def upgrade_final_warmup_m104_to_m109(text: str) -> tuple[str, int]:
@@ -983,6 +1026,10 @@ def process_gcode(path: Path) -> None:
         upgrade_final_warmup_m104_to_m109(new_text)
         if ENABLE_M104_TO_M109_WARMUP_FIX else (new_text, 0)
     )
+    new_text, layer_count_injected = (
+        inject_layer_count_marker(new_text)
+        if ENABLE_INJECT_LAYER_COUNT_MARKER else (new_text, 0)
+    )
     new_text, m155_injected = inject_m155_throttle(new_text)
     new_text, init_notif_moved = (
         move_initial_notifications_after_print_start(new_text)
@@ -1041,7 +1088,8 @@ def process_gcode(path: Path) -> None:
     has_thumb = "yes" if thumbnail_header else "no"
     print(f"[btt_postprocess] {path.name}: "
           f"thumb={has_thumb} m73={m73_count} m115={m115_stripped} "
-          f"m104_fix={m104_upgraded} m155={m155_injected} "
+          f"m104_fix={m104_upgraded} lc={layer_count_injected} "
+          f"m155={m155_injected} "
           f"init_notif={init_notif_moved} end_notif={end_notif_moved} "
           f"png={png_blocks_stripped} cfg={config_block_dropped} "
           f"feat={feature_cmts_stripped} inline={inline_cmts_stripped} "

@@ -7,6 +7,7 @@ from btt_postprocess import (
     collapse_blank_lines,
     extract_png_from_gcode,
     format_time_left,
+    inject_layer_count_marker,
     inject_m155_throttle,
     inject_m73_notifications,
     minify_float_coordinates,
@@ -284,6 +285,62 @@ class TestUpgradeFinalWarmupM104ToM109:
         result, count = upgrade_final_warmup_m104_to_m109(gcode)
         assert count == 1
         assert "M109 S220 ; set nozzle\r\n" in result
+
+
+class TestInjectLayerCountMarker:
+    def test_injects_after_orca_total_layer_number(self):
+        # Orca writes "; total layer number: N". BTT TFT firmware and
+        # the Mintion Beagle web UI both look for the PrusaSlicer/Cura
+        # canonical "; LAYER_COUNT:N" instead, so we add it alongside.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 86\r\n"
+            "; max_z_height: 17.20\r\n"
+            "G28\r\n"
+        )
+        result, count = inject_layer_count_marker(gcode)
+        assert count == 1
+        lines = result.splitlines(keepends=True)
+        # The new line should be immediately after the total-layer line.
+        total_idx = next(
+            i for i, line in enumerate(lines)
+            if "total layer number" in line
+        )
+        assert lines[total_idx + 1] == ";LAYER_COUNT:86\r\n"
+        # Orca's original line is preserved.
+        assert "; total layer number: 86\r\n" in result
+
+    def test_preserves_eol_style_lf(self):
+        gcode = "; total layer number: 12\nG28\n"
+        result, count = inject_layer_count_marker(gcode)
+        assert count == 1
+        assert ";LAYER_COUNT:12\n" in result
+
+    def test_handles_orca_post_leading_ws_strip(self):
+        # Our strip_comment_leading_whitespace pass converts the line to
+        # ";total layer number: 86" (no space). The injection still works.
+        gcode = ";total layer number: 86\r\nG28\r\n"
+        result, count = inject_layer_count_marker(gcode)
+        assert count == 1
+        assert ";LAYER_COUNT:86\r\n" in result
+
+    def test_idempotent_when_layer_count_already_present(self):
+        # PrusaSlicer files already have ;LAYER_COUNT:; re-runs of our
+        # own output keep one too. No second injection in either case.
+        gcode = (
+            "; total layer number: 86\r\n"
+            ";LAYER_COUNT:86\r\n"
+            "G28\r\n"
+        )
+        result, count = inject_layer_count_marker(gcode)
+        assert count == 0
+        assert result.count(";LAYER_COUNT:86") == 1
+
+    def test_noop_when_no_total_layer_number(self):
+        gcode = ";LAYER_CHANGE\r\nG1 Z0.2\r\nG1 X10\r\n"
+        result, count = inject_layer_count_marker(gcode)
+        assert count == 0
+        assert result == gcode
 
 
 class TestInjectM155Throttle:

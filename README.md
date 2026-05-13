@@ -112,6 +112,7 @@ The passes group into three categories:
 |---|---|
 | BTT thumbnail conversion | Resizes the slicer's PNG to the four sizes BTT firmware expects (70×70, 95×80, 95×95, 160×140), converts each to RGB565 hex, prepends the result to the file. The TFT can't show a preview without this. |
 | `M73` → `M118` notifications | After every `M73 P<%> R<minutes>` the slicer emits, injects `M118 P0 A1 action:notification Time Left HHhMMm00s` and `Data Left <%>/100`. These drive the TFT's time-left countdown and progress bar. |
+| Inject `;LAYER_COUNT:N` | BTT TFT firmware and the Mintion Beagle web UI look for the PrusaSlicer/Cura canonical `;LAYER_COUNT:N` to populate their "X / N Layers" tile. Orca writes `; total layer number: N` instead, which neither parser recognizes (the total reads as 0 even though the data is in the file). The script reads N from Orca's line and inserts a sibling `;LAYER_COUNT:N` immediately after. Orca's original is preserved. |
 | Start-of-print notification ordering | Slicer start gcode normally fires `M73` BEFORE `action:print_start`. The TFT only opens the print screen on `print_start`, so the initial "Time Left / Data Left" pair would be invisible. The script moves a fresh pair to immediately AFTER `print_start`. |
 | End-of-print notification ordering | Slicer end gcode normally fires `action:print_end` BEFORE the final `M73 P100 R0`. The TFT dismisses the print screen on `print_end`, so the 100% / 00:00 state never shows. The script inserts a fresh "100/100, 00h00m00s" pair immediately BEFORE `print_end` and drops stale notifications on the wrong side of either anchor. |
 
@@ -164,6 +165,7 @@ CRCRLF handling is also always-on — it's a correctness fix.
 |---|---|---|
 | `ENABLE_STRIP_M115` | `True` | Strip `M115` firmware-info queries. Disable if you actually want their response for some reason. |
 | `ENABLE_M104_TO_M109_WARMUP_FIX` | `True` | Upgrade the final pre-print `M104 S>0` to `M109` when the slicer's auto-header forgot to wait. Disable if your start gcode handles waits itself and you'd rather the script not touch them. |
+| `ENABLE_INJECT_LAYER_COUNT_MARKER` | `True` | Inject `;LAYER_COUNT:N` alongside Orca's `; total layer number: N` so BTT firmware / Beagle web UI see the layer total. Disable if you're on a slicer that already emits `;LAYER_COUNT:` (PrusaSlicer, Cura — injection is a no-op there anyway). |
 | `M155_INTERVAL_SECONDS` | `30` | Seconds between Marlin's auto temperature reports. Lower = faster temp updates in the Beagle app, more serial traffic. Higher = less traffic, slower display. Set to `0` to skip injection entirely (printer keeps Marlin's 5s default). |
 
 ### TFT notification ordering

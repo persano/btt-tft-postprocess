@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.1 — 2026-05-13
+
+Bug fixes:
+
+- **Inject `;LAYER_COUNT:N` so the Beagle / TFT "Layers X/N" tile shows
+  N.** BTT TFT firmware and the Mintion Beagle web UI both look for the
+  PrusaSlicer/Cura canonical `;LAYER_COUNT:N` to populate the layer-total
+  tile. Orca emits `; total layer number: N` instead, which neither
+  parser recognizes, so the total reads as `0` even though the layer
+  count is right there in the file. v0.2.0 unbroke the height markers
+  but missed this -- the symptom was tiles like `4 / 0 Layers` showing
+  during prints. The script now reads N from Orca's line and inserts a
+  sibling `;LAYER_COUNT:N` immediately after. Idempotent (skipped if a
+  LAYER_COUNT line is already present). Behavior is gated by the new
+  `ENABLE_INJECT_LAYER_COUNT_MARKER = True` flag.
+
 ## v0.2.0 — 2026-05-13
 
 Bug fixes:
