@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+Notification ordering:
+
+- `move_final_notifications_before_print_end` inserts a fresh
+  `Time Left 00h00m00s` / `Data Left 100/100` notification pair
+  immediately before `M118 P0 A1 action:print_end`, and drops any stale
+  notification lines that come after. Previously the TFT saw `print_end`
+  and dismissed the print screen before it could ever see the completion
+  state.
+
+Whitespace cleanup:
+
+- `strip_trailing_whitespace` trims trailing spaces/tabs from every line.
+- BTT thumbnail header no longer emits a redundant blank line after
+  `; bigtree thumbnail end`.
+
 Beagle-compatibility fixes:
 
 - Strip `M115` firmware-info queries from the file. Their multi-line response

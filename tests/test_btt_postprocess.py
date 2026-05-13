@@ -10,6 +10,7 @@ from btt_postprocess import (
     inject_m155_throttle,
     inject_m73_notifications,
     minify_float_coordinates,
+    move_final_notifications_before_print_end,
     rgb_to_rgb565_hex,
     strip_existing_btt_thumbnail,
     strip_inline_command_comments,
@@ -17,6 +18,7 @@ from btt_postprocess import (
     strip_png_thumbnail_blocks,
     strip_slicer_config_block,
     strip_slicer_feature_comments,
+    strip_trailing_whitespace,
     upgrade_final_warmup_m104_to_m109,
 )
 
@@ -626,6 +628,94 @@ class TestMinifyFloatCoordinates:
         result, count = minify_float_coordinates(gcode)
         assert count == 1
         assert result == "M104 S220\r\n"
+
+
+class TestMoveFinalNotificationsBeforePrintEnd:
+    def test_inserts_before_print_end_and_drops_stale_after(self):
+        # Classic case: print_end fires, then M73 P100 + 100% notifications
+        # come after, so the TFT never sees the completion state.
+        gcode = (
+            "M84 X Y E\r\n"
+            "M118 P0 A1 action:print_end\r\n"
+            "M73 P100 R0\r\n"
+            "M118 P0 A1 action:notification Time Left 00h00m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 100/100\r\n"
+            "; filament used 304 mm\r\n"
+        )
+        result, moved = move_final_notifications_before_print_end(gcode)
+        assert moved == 1
+        lines = result.splitlines(keepends=True)
+        # New ordering:
+        assert lines[0] == "M84 X Y E\r\n"
+        assert lines[1] == "M118 P0 A1 action:notification Time Left 00h00m00s\r\n"
+        assert lines[2] == "M118 P0 A1 action:notification Data Left 100/100\r\n"
+        assert lines[3] == "M118 P0 A1 action:print_end\r\n"
+        # M73 stays (Marlin uses it natively); stale notifications dropped.
+        assert "M73 P100 R0\r\n" in result
+        assert result.count("action:notification") == 2
+        assert "; filament used 304 mm\r\n" in result
+
+    def test_no_print_end_unchanged(self):
+        gcode = "G28\r\nG1 X10 E5\r\nM84\r\n"
+        result, moved = move_final_notifications_before_print_end(gcode)
+        assert moved == 0
+        assert result == gcode
+
+    def test_lf_endings(self):
+        gcode = "M118 P0 A1 action:print_end\n"
+        result, moved = move_final_notifications_before_print_end(gcode)
+        assert moved == 1
+        lines = result.splitlines(keepends=True)
+        assert lines[0].endswith("\n") and not lines[0].endswith("\r\n")
+        assert lines[0] == "M118 P0 A1 action:notification Time Left 00h00m00s\n"
+        assert lines[2] == "M118 P0 A1 action:print_end\n"
+
+    def test_first_print_end_wins_if_multiple(self):
+        # In the wild there's only one, but if a file has two we should
+        # use the earliest as the anchor and treat the later one as
+        # post-end content that survives.
+        gcode = (
+            "M118 P0 A1 action:print_end\r\n"
+            "M73 P100\r\n"
+            "M118 P0 A1 action:notification Data Left 100/100\r\n"
+            "M118 P0 A1 action:print_end\r\n"
+        )
+        result, moved = move_final_notifications_before_print_end(gcode)
+        assert moved == 1
+        # First two output lines are the injected notifs
+        lines = result.splitlines(keepends=True)
+        assert lines[0].startswith("M118 P0 A1 action:notification Time Left")
+        assert lines[1].startswith("M118 P0 A1 action:notification Data Left 100/100")
+        assert lines[2] == "M118 P0 A1 action:print_end\r\n"
+        # Stale notification dropped, second print_end kept
+        assert result.count("action:print_end") == 2
+        assert result.count("action:notification") == 2  # only the two we inserted
+
+
+class TestStripTrailingWhitespace:
+    def test_trims_trailing_spaces(self):
+        gcode = "G1 X10 Y20   \r\nG28  \r\nM104 S220\r\n"
+        result, count = strip_trailing_whitespace(gcode)
+        assert count == 2
+        assert result == "G1 X10 Y20\r\nG28\r\nM104 S220\r\n"
+
+    def test_trims_trailing_tabs(self):
+        gcode = "G1 X10\t\t\r\n"
+        result, count = strip_trailing_whitespace(gcode)
+        assert count == 1
+        assert result == "G1 X10\r\n"
+
+    def test_handles_lf_endings(self):
+        gcode = "G1 X10  \n"
+        result, count = strip_trailing_whitespace(gcode)
+        assert count == 1
+        assert result == "G1 X10\n"
+
+    def test_no_trailing_whitespace_unchanged(self):
+        gcode = "G28\r\nG1 X10\r\n"
+        result, count = strip_trailing_whitespace(gcode)
+        assert count == 0
+        assert result == gcode
 
 
 class TestStripExistingBttThumbnail:
