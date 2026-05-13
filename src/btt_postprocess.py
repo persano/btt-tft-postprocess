@@ -29,10 +29,15 @@ Combines several jobs into one pass over the sliced .gcode:
    is every 5 seconds; raising it to 30s cuts serial traffic ~6x and is
    the other half of keeping a Mintion Beagle from buffer-overflowing.
 
-6) Moves the final "100% / 00:00:00" M118 notification pair to
-   immediately before `action:print_end`, and drops any stray
-   notifications that come after. Otherwise the TFT sees `print_end` and
-   dismisses the print screen before it can show the completion state.
+6) Reorders the M118 notification pairs around `action:print_start` and
+   `action:print_end`:
+   - The initial "0% / total time" notifications move to immediately
+     AFTER `action:print_start`, since the TFT only opens the print
+     screen on that action.
+   - The final "100% / 00:00:00" notifications move to immediately
+     BEFORE `action:print_end`, since the TFT dismisses the print
+     screen on that action.
+   Stray notification lines outside that window are dropped.
 
 7) Strips the slicer's base64 PNG thumbnail block(s). We've already
    extracted the PNG and converted it to the BTT TFT format, so the
@@ -396,7 +401,67 @@ def upgrade_final_warmup_m104_to_m109(text: str) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 _PRINT_END_RE = re.compile(r"action:print_end\b", re.IGNORECASE)
+_PRINT_START_RE = re.compile(r"action:print_start\b", re.IGNORECASE)
 _NOTIFICATION_RE = re.compile(r"action:notification\b", re.IGNORECASE)
+
+
+def move_initial_notifications_after_print_start(text: str) -> tuple[str, int]:
+    """
+    Slicer start gcode usually emits the first `M73 P0 R<minutes>` BEFORE
+    `M118 P0 A1 action:print_start`. The TFT only opens the print screen
+    when it sees print_start, so the initial notification pair we injected
+    after that first M73 is silently dropped. Fix:
+
+      1) Read the percentage / minutes from the first M73 in the file.
+      2) Insert a fresh notification pair immediately after the first
+         `action:print_start` line.
+      3) Drop any other `action:notification` lines that come BEFORE
+         `print_start`, since the TFT can't see them.
+
+    Returns (new_text, 1) if reordering happened, else (text, 0).
+    """
+    lines = text.splitlines(keepends=True)
+    print_start_idx: int | None = None
+    for i, line in enumerate(lines):
+        if _PRINT_START_RE.search(line):
+            print_start_idx = i
+            break
+
+    if print_start_idx is None:
+        return text, 0
+
+    initial_percent = 0
+    initial_minutes: int | None = None
+    for line in lines:
+        match = M73_RE.match(line)
+        if match:
+            initial_percent = int(match.group("p"))
+            initial_minutes = (
+                int(match.group("r")) if match.group("r") is not None else None
+            )
+            break
+
+    eol = "\r\n" if lines[print_start_idx].endswith("\r\n") else "\n"
+    initial_notifs: list[str] = []
+    if initial_minutes is not None:
+        initial_notifs.append(
+            f"M118 P0 A1 action:notification Time Left "
+            f"{format_time_left(initial_minutes)}{eol}"
+        )
+    initial_notifs.append(
+        f"M118 P0 A1 action:notification Data Left {initial_percent}/100{eol}"
+    )
+
+    # Drop any pre-print_start notification lines -- the TFT won't have
+    # opened the print screen yet, so they're invisible anyway.
+    before = [
+        line for line in lines[:print_start_idx]
+        if not _NOTIFICATION_RE.search(line)
+    ]
+    after = lines[print_start_idx + 1:]
+    print_start_line = lines[print_start_idx]
+
+    return "".join(before + [print_start_line] + initial_notifs + after), 1
 
 
 def move_final_notifications_before_print_end(text: str) -> tuple[str, int]:
@@ -772,6 +837,7 @@ def process_gcode(path: Path) -> None:
     new_text, m115_stripped = strip_m115_queries(new_text)
     new_text, m104_upgraded = upgrade_final_warmup_m104_to_m109(new_text)
     new_text, m155_injected = inject_m155_throttle(new_text)
+    new_text, init_notif_moved = move_initial_notifications_after_print_start(new_text)
     new_text, end_notif_moved = move_final_notifications_before_print_end(new_text)
     # Size reductions last -- they only remove bytes, never change semantics.
     new_text, png_blocks_stripped = strip_png_thumbnail_blocks(new_text)
@@ -795,7 +861,7 @@ def process_gcode(path: Path) -> None:
     print(f"[btt_postprocess] {path.name}: "
           f"thumb={has_thumb} m73={m73_count} m115={m115_stripped} "
           f"m104_fix={m104_upgraded} m155={m155_injected} "
-          f"end_notif={end_notif_moved} "
+          f"init_notif={init_notif_moved} end_notif={end_notif_moved} "
           f"png={png_blocks_stripped} cfg={config_block_dropped} "
           f"feat={feature_cmts_stripped} inline={inline_cmts_stripped} "
           f"minify={minified_lines} ws={ws_trimmed} "

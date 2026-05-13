@@ -4,6 +4,12 @@
 
 Notification ordering:
 
+- `move_initial_notifications_after_print_start` reads the percentage
+  and minutes from the first `M73` and inserts a fresh notification
+  pair immediately after `M118 P0 A1 action:print_start`. Drops any
+  stale notification lines that come before `print_start`. Previously
+  those notifications fired before the TFT had opened the print screen,
+  so the initial Time Left / Data Left values were invisible.
 - `move_final_notifications_before_print_end` inserts a fresh
   `Time Left 00h00m00s` / `Data Left 100/100` notification pair
   immediately before `M118 P0 A1 action:print_end`, and drops any stale

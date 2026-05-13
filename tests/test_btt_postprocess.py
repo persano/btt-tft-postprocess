@@ -11,6 +11,7 @@ from btt_postprocess import (
     inject_m73_notifications,
     minify_float_coordinates,
     move_final_notifications_before_print_end,
+    move_initial_notifications_after_print_start,
     rgb_to_rgb565_hex,
     strip_existing_btt_thumbnail,
     strip_inline_command_comments,
@@ -628,6 +629,63 @@ class TestMinifyFloatCoordinates:
         result, count = minify_float_coordinates(gcode)
         assert count == 1
         assert result == "M104 S220\r\n"
+
+
+class TestMoveInitialNotificationsAfterPrintStart:
+    def test_inserts_after_print_start_and_drops_stale_before(self):
+        # M73 + injected M118s come BEFORE print_start, where the TFT
+        # can't see them. They should move to AFTER print_start.
+        gcode = (
+            "M155 S30\r\n"
+            "M73 P0 R12\r\n"
+            "M118 P0 A1 action:notification Time Left 00h12m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 0/100\r\n"
+            "M201 X2000 Y2000 Z500 E5000\r\n"
+            "M118 P0 A1 action:print_start\r\n"
+            "M83\r\n"
+        )
+        result, moved = move_initial_notifications_after_print_start(gcode)
+        assert moved == 1
+        lines = result.splitlines(keepends=True)
+        # Pre-print_start notifications dropped; M73 + non-notification lines kept.
+        assert "M155 S30\r\n" in result
+        assert "M73 P0 R12\r\n" in result
+        assert "M201 X2000 Y2000 Z500 E5000\r\n" in result
+        # Notification pair now sits immediately AFTER print_start.
+        ps_idx = next(i for i, ln in enumerate(lines)
+                      if "action:print_start" in ln)
+        assert lines[ps_idx + 1] == (
+            "M118 P0 A1 action:notification Time Left 00h12m00s\r\n"
+        )
+        assert lines[ps_idx + 2] == (
+            "M118 P0 A1 action:notification Data Left 0/100\r\n"
+        )
+        # Only one set of notifications survives.
+        assert result.count("action:notification") == 2
+
+    def test_no_print_start_unchanged(self):
+        gcode = "G28\r\nM73 P0 R12\r\nG1 X10 E5\r\n"
+        result, moved = move_initial_notifications_after_print_start(gcode)
+        assert moved == 0
+        assert result == gcode
+
+    def test_no_m73_falls_back_to_zero_percent(self):
+        gcode = "M118 P0 A1 action:print_start\r\nG28\r\n"
+        result, moved = move_initial_notifications_after_print_start(gcode)
+        assert moved == 1
+        # No Time Left line (no R minutes available), but Data Left fires.
+        assert "Time Left" not in result
+        assert "M118 P0 A1 action:notification Data Left 0/100\r\n" in result
+
+    def test_lf_endings(self):
+        gcode = "M73 P0 R12\nM118 P0 A1 action:print_start\n"
+        result, moved = move_initial_notifications_after_print_start(gcode)
+        assert moved == 1
+        lines = result.splitlines(keepends=True)
+        # All notifications use \n endings, not \r\n
+        for line in lines:
+            if "action:notification" in line:
+                assert line.endswith("\n") and not line.endswith("\r\n")
 
 
 class TestMoveFinalNotificationsBeforePrintEnd:
