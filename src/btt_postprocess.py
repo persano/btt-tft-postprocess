@@ -458,7 +458,14 @@ def move_initial_notifications_after_print_start(text: str) -> tuple[str, int]:
         line for line in lines[:print_start_idx]
         if not _NOTIFICATION_RE.search(line)
     ]
-    after = lines[print_start_idx + 1:]
+    # Drop any notification lines IMMEDIATELY after print_start too.
+    # Without this, a second run would stack a fresh pair on top of the
+    # pair the previous run already inserted.
+    after_lines = lines[print_start_idx + 1:]
+    skip = 0
+    while skip < len(after_lines) and _NOTIFICATION_RE.search(after_lines[skip]):
+        skip += 1
+    after = after_lines[skip:]
     print_start_line = lines[print_start_idx]
 
     return "".join(before + [print_start_line] + initial_notifs + after), 1
@@ -495,9 +502,18 @@ def move_final_notifications_before_print_end(text: str) -> tuple[str, int]:
         f"M118 P0 A1 action:notification Data Left 100/100{eol}",
     ]
 
-    # Keep everything before print_end as-is; drop any post-print_end
-    # notification lines so the TFT doesn't get re-triggered.
-    before = lines[:print_end_idx]
+    # Drop any notification lines IMMEDIATELY before print_end. Without
+    # this, a second run stacks a fresh pair on top of the pair the
+    # previous run already inserted.
+    before_lines = lines[:print_end_idx]
+    trim = 0
+    while trim < len(before_lines) and _NOTIFICATION_RE.search(
+        before_lines[len(before_lines) - 1 - trim]
+    ):
+        trim += 1
+    before = before_lines[:len(before_lines) - trim]
+    # Drop any post-print_end notification lines so the TFT doesn't get
+    # re-triggered with stale state after it's already shown "complete".
     after = [
         line for line in lines[print_end_idx + 1:]
         if not _NOTIFICATION_RE.search(line)
@@ -584,18 +600,25 @@ _FEATURE_COMMENT_RE = re.compile(
 )
 
 
+# A line that's just `;` (with optional whitespace). Orca emits these as
+# visual spacers between metadata sections; once the surrounding metadata
+# is stripped they're orphan no-ops.
+_EMPTY_COMMENT_RE = re.compile(r"^;\s*$")
+
+
 def strip_slicer_feature_comments(text: str) -> tuple[str, int]:
     """
-    Remove slicer-emitted comments that no downstream consumer reads.
-    Preserves layer markers that BTT TFT firmware uses for the layer count
-    display (LAYER_CHANGE, LAYER_NUM, LAYER_COUNT, BEFORE/AFTER_LAYER_CHANGE).
+    Remove slicer-emitted comments that no downstream consumer reads, plus
+    bare `;` separator lines. Preserves layer markers that BTT TFT firmware
+    uses for the layer count display (LAYER_CHANGE, LAYER_NUM, LAYER_COUNT,
+    BEFORE/AFTER_LAYER_CHANGE).
 
     Returns (new_text, dropped_count).
     """
     output: list[str] = []
     dropped = 0
     for line in text.splitlines(keepends=True):
-        if _FEATURE_COMMENT_RE.match(line):
+        if _FEATURE_COMMENT_RE.match(line) or _EMPTY_COMMENT_RE.match(line):
             dropped += 1
             continue
         output.append(line)
@@ -818,9 +841,17 @@ def write_output_name_hint(gcode_path: Path) -> None:
 
 def process_gcode(path: Path) -> None:
     """Run all transformations on the file, in place."""
-    # Read raw to preserve line endings as much as possible. The slicer
-    # writes UTF-8; replacement on errors keeps us robust to odd bytes.
-    text = path.read_text(encoding="utf-8", errors="replace")
+    # Open with newline="" so Python doesn't do universal-newline translation
+    # on read or implicit CRLF translation on write. Without this, our \r\n
+    # injections (BTT thumbnail rows, M118 lines, M155, ...) get re-translated
+    # to \r\r\n on Windows write, which most editors render as blank lines
+    # between the real lines.
+    with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+        text = f.read()
+    # Heal any \r\r\n damage left over from an earlier version of this script
+    # that did suffer from the double-translation. One pass is enough; the
+    # replacement leaves clean \r\n behind.
+    text = text.replace("\r\r\n", "\r\n")
     original_size = len(text)
 
     # If this file was already post-processed, drop the existing BTT
@@ -849,7 +880,10 @@ def process_gcode(path: Path) -> None:
     new_text, blanks_collapsed = collapse_blank_lines(new_text)
 
     final_text = thumbnail_header + new_text
-    path.write_text(final_text, encoding="utf-8")
+    # newline="" again -- write our explicit \r\n line endings to disk as-is
+    # rather than letting the Windows text-mode wrapper add another \r.
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(final_text)
     write_output_name_hint(path)
 
     final_size = len(final_text)

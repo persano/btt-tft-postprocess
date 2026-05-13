@@ -19,9 +19,22 @@ Notification ordering:
 
 Whitespace cleanup:
 
+- **Fix:** read/write the gcode file with `newline=""`. Previously
+  Python's Windows text-mode wrapper translated `\n` to `\r\n` on write
+  on top of our already-`\r\n` injected lines, producing `\r\r\n` on
+  disk. Most editors render that lone CR between the CR and the LF as
+  a blank line, which is why every BTT thumbnail row and every injected
+  M118 pair appeared to have a blank line after it. Reads now also heal
+  any existing `\r\r\n` damage from files produced by the buggy version.
 - `strip_trailing_whitespace` trims trailing spaces/tabs from every line.
+- `strip_slicer_feature_comments` now also drops bare `;` lines that
+  Orca emits as visual spacers between metadata sections.
 - BTT thumbnail header no longer emits a redundant blank line after
   `; bigtree thumbnail end`.
+- `move_initial_notifications_after_print_start` and
+  `move_final_notifications_before_print_end` are now idempotent: they
+  also strip notification lines immediately on the "wrong" side of the
+  anchor, so re-running the script no longer stacks duplicate pairs.
 
 Beagle-compatibility fixes:
 

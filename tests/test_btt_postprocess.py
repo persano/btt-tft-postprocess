@@ -566,6 +566,12 @@ class TestStripMetadataComments:
         result, count = strip_slicer_feature_comments(gcode)
         assert count == 1
 
+    def test_strips_bare_semicolon_separator(self):
+        gcode = ";\r\nG28\r\n;   \r\nG1 X10\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 2
+        assert result == "G28\r\nG1 X10\r\n"
+
     def test_preserves_layer_count_metadata(self):
         # LAYER_COUNT is firmware-readable -- do not strip even though it
         # looks similar to total-layer-number.
@@ -687,6 +693,21 @@ class TestMoveInitialNotificationsAfterPrintStart:
             if "action:notification" in line:
                 assert line.endswith("\n") and not line.endswith("\r\n")
 
+    def test_idempotent_on_already_processed_file(self):
+        # Re-running shouldn't stack duplicate notification pairs after
+        # print_start.
+        gcode = (
+            "M73 P0 R12\r\n"
+            "M118 P0 A1 action:print_start\r\n"
+            "M118 P0 A1 action:notification Time Left 00h12m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 0/100\r\n"
+            "M83\r\n"
+        )
+        once, _ = move_initial_notifications_after_print_start(gcode)
+        twice, _ = move_initial_notifications_after_print_start(once)
+        assert twice.count("action:notification") == 2
+        assert twice == once
+
 
 class TestMoveFinalNotificationsBeforePrintEnd:
     def test_inserts_before_print_end_and_drops_stale_after(self):
@@ -728,6 +749,21 @@ class TestMoveFinalNotificationsBeforePrintEnd:
         assert lines[0] == "M118 P0 A1 action:notification Time Left 00h00m00s\n"
         assert lines[2] == "M118 P0 A1 action:print_end\n"
 
+    def test_idempotent_on_already_processed_file(self):
+        # Re-running shouldn't stack duplicate notification pairs before
+        # print_end.
+        gcode = (
+            "M84 X Y E\r\n"
+            "M118 P0 A1 action:notification Time Left 00h00m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 100/100\r\n"
+            "M118 P0 A1 action:print_end\r\n"
+            "M73 P100 R0\r\n"
+        )
+        once, _ = move_final_notifications_before_print_end(gcode)
+        twice, _ = move_final_notifications_before_print_end(once)
+        assert twice.count("action:notification") == 2
+        assert twice == once
+
     def test_first_print_end_wins_if_multiple(self):
         # In the wild there's only one, but if a file has two we should
         # use the earliest as the anchor and treat the later one as
@@ -748,6 +784,50 @@ class TestMoveFinalNotificationsBeforePrintEnd:
         # Stale notification dropped, second print_end kept
         assert result.count("action:print_end") == 2
         assert result.count("action:notification") == 2  # only the two we inserted
+
+
+class TestNewlineRoundTrip:
+    """Round-trip a file through process_gcode and confirm line endings
+    stay clean. Prior versions produced CRCRLF on disk because of Windows
+    text-mode newline translation re-applying CRLF to our already-CRLF
+    string literals."""
+
+    def test_does_not_emit_crcrlf(self, tmp_path):
+        # Minimal gcode with our usual transforms applicable.
+        gcode_text = (
+            "M118 P0 A1 action:print_start\r\n"
+            "M73 P0 R12\r\n"
+            "G28\r\n"
+            "G1 X10 Y10 E5\r\n"
+            "M118 P0 A1 action:print_end\r\n"
+        )
+        gcode = tmp_path / "test.gcode"
+        gcode.write_bytes(gcode_text.encode("utf-8"))
+
+        from btt_postprocess import process_gcode
+        process_gcode(gcode)
+
+        raw = gcode.read_bytes()
+        assert b"\r\r\n" not in raw, (
+            "Double CR found on disk -- newline translation bug regressed"
+        )
+
+    def test_heals_existing_crcrlf(self, tmp_path):
+        # Simulate a file produced by the buggy previous version.
+        damaged = (
+            "M118 P0 A1 action:print_start\r\r\n"
+            "M73 P0 R12\r\r\n"
+            "G28\r\r\n"
+            "M118 P0 A1 action:print_end\r\r\n"
+        )
+        gcode = tmp_path / "damaged.gcode"
+        gcode.write_bytes(damaged.encode("utf-8"))
+
+        from btt_postprocess import process_gcode
+        process_gcode(gcode)
+
+        raw = gcode.read_bytes()
+        assert b"\r\r\n" not in raw
 
 
 class TestStripTrailingWhitespace:
