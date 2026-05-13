@@ -24,8 +24,28 @@ Combines several jobs into one pass over the sliced .gcode:
    around OrcaSlicer issues #2334 and #4337 where the print starts moving
    before the nozzle has reached temperature.
 
-The original gcode lines (M73, thumbnail block) are preserved -- we only
-ADD content. Marlin still uses M73 for its own internal progress tracking.
+5) Injects `M155 S<interval>` before the first executable command to
+   throttle Marlin's automatic temperature auto-reports. Marlin's default
+   is every 5 seconds; raising it to 30s cuts serial traffic ~6x and is
+   the other half of keeping a Mintion Beagle from buffer-overflowing.
+
+6) Strips the slicer's base64 PNG thumbnail block(s). We've already
+   extracted the PNG and converted it to the BTT TFT format, so the
+   payload (~50-200 KB per file) is dead weight on disk.
+
+7) Strips slicer "feature" comments that no firmware consumer reads
+   (TYPE/WIDTH/HEIGHT/Z, WIPE_*, OBJECT_ID, HEADER/THUMBNAIL/EXECUTABLE
+   block markers). Preserves LAYER_CHANGE / LAYER_COUNT which BTT TFT
+   firmware does read.
+
+8) Strips the trailing `; comment` portion of lines that start with a G
+   or M command (e.g. `G1 X10 ; whatever` -> `G1 X10`). Standalone
+   comment lines and M117/M118 message commands are left alone.
+
+9) Collapses blank lines.
+
+Jobs 1-5 are content rewrites. Jobs 6-9 are size reductions: typical
+savings on a long print are 5-15% of file bytes.
 
 Usage in Orca:
     Print Settings -> Others -> Post-processing scripts
@@ -207,13 +227,16 @@ def build_m73_notifications(percent: int, minutes: int | None) -> list[str]:
 def inject_m73_notifications(gcode_text: str) -> tuple[str, int]:
     """
     Walk the gcode line by line; after each real M73 line, append M118
-    notifications. Returns (new_text, count_of_m73_lines_processed).
+    notifications. If the next line is already an M118 action:notification
+    (file was post-processed before), skip the injection so re-runs stay
+    idempotent. Returns (new_text, count_of_m73_lines_processed).
     """
     output: list[str] = []
     m73_count = 0
 
     # splitlines(keepends=True) preserves \r\n endings as-is.
-    for line in gcode_text.splitlines(keepends=True):
+    lines = gcode_text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
         output.append(line)
 
         stripped = line.lstrip()
@@ -222,6 +245,12 @@ def inject_m73_notifications(gcode_text: str) -> tuple[str, int]:
 
         match = M73_RE.match(line)
         if not match:
+            continue
+
+        # Skip if a notification line already follows -- avoids stacking
+        # duplicates when the script is run twice on the same file.
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+        if "action:notification" in next_line:
             continue
 
         percent = int(match.group("p"))
@@ -266,6 +295,47 @@ def strip_m115_queries(text: str) -> tuple[str, int]:
     return "".join(out), removed
 
 
+# Default interval (seconds) for M155 auto-temperature reports. Marlin's
+# built-in default is 5s; raising this cuts serial traffic ~6x and helps
+# serial-proxy hosts (Mintion Beagle) keep up. Adjust here if you want a
+# different rate -- 60 is also reasonable.
+M155_INTERVAL_SECONDS = 30
+
+_M155_RE = re.compile(r"^\s*M155\b", re.IGNORECASE)
+
+
+def inject_m155_throttle(
+    text: str, interval_seconds: int = M155_INTERVAL_SECONDS,
+) -> tuple[str, int]:
+    """
+    Insert an `M155 S<interval_seconds>` line just before the first
+    executable command. If the file already has an M155 anywhere in the
+    warmup region (user is managing this themselves), do nothing.
+
+    Returns (new_text, 1) if a line was inserted, otherwise (text, 0).
+    """
+    lines = text.splitlines(keepends=True)
+    first_exec_idx: int | None = None
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith(";"):
+            continue
+        if _EXTRUSION_RE.match(line):
+            break
+        if _M155_RE.match(line):
+            return text, 0
+        if first_exec_idx is None:
+            first_exec_idx = i
+
+    if first_exec_idx is None:
+        return text, 0
+
+    eol = "\r\n" if lines[first_exec_idx].endswith("\r\n") else "\n"
+    lines.insert(first_exec_idx, f"M155 S{interval_seconds}{eol}")
+    return "".join(lines), 1
+
+
 def upgrade_final_warmup_m104_to_m109(text: str) -> tuple[str, int]:
     """
     Walk the file until the first extrusion move. Within that warmup window,
@@ -305,6 +375,176 @@ def upgrade_final_warmup_m104_to_m109(text: str) -> tuple[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Size-reduction passes
+# ---------------------------------------------------------------------------
+
+# Orca/Prusa emit thumbnails as `; thumbnail begin <w>x<h> <bytes>` /
+# `; thumbnail end`, sometimes in multiple variants (thumbnail_QOI,
+# thumbnail_JPG, etc.). We match all of them.
+_THUMBNAIL_BEGIN_RE = re.compile(
+    r"^;\s*thumbnail(?:_\w+)?\s+begin\b", re.IGNORECASE,
+)
+_THUMBNAIL_END_RE = re.compile(
+    r"^;\s*thumbnail(?:_\w+)?\s+end\b", re.IGNORECASE,
+)
+
+
+def strip_png_thumbnail_blocks(text: str) -> tuple[str, int]:
+    """
+    Drop all `; thumbnail begin ... ; thumbnail end` blocks. We've already
+    extracted the PNG and converted it to BTT format, so the base64
+    payload is dead weight (50-200 KB per file, multiple blocks possible
+    when the slicer emits QOI/JPG variants too).
+
+    Returns (new_text, blocks_dropped).
+    """
+    output: list[str] = []
+    inside = False
+    blocks = 0
+    for line in text.splitlines(keepends=True):
+        if not inside and _THUMBNAIL_BEGIN_RE.match(line):
+            inside = True
+            blocks += 1
+            continue
+        if inside:
+            if _THUMBNAIL_END_RE.match(line):
+                inside = False
+            continue
+        output.append(line)
+    return "".join(output), blocks
+
+
+# Slicer-emitted comment lines that no Marlin / BTT TFT firmware consumer
+# reads. Each pattern is anchored to a SPECIFIC well-known marker so we
+# don't accidentally remove anything firmware-relevant (LAYER_CHANGE,
+# LAYER_COUNT, AFTER_LAYER_CHANGE, etc. are intentionally NOT in the list).
+_FEATURE_COMMENT_RE = re.compile(
+    r"^;\s*("
+    r"TYPE:"                  # ;TYPE:Outer wall  (per-segment feature label)
+    r"|WIDTH:"                # ;WIDTH:0.42       (per-segment line width)
+    r"|HEIGHT:"               # ;HEIGHT:0.2       (already encoded in G1 Z)
+    r"|Z:\d"                  # ;Z:0.2            (ditto)
+    r"|CHANGE_LAYER\b"        # ;CHANGE_LAYER     (note: distinct from LAYER_CHANGE)
+    r"|FEATURE:"              # Cura / older Prusa flavor
+    r"|LINE_WIDTH:"
+    r"|WIPE_START\b|WIPE_END\b"
+    r"|FLUSH_START\b|FLUSH_END\b"
+    r"|WIPE_TOWER_START\b|WIPE_TOWER_END\b"
+    r"|OBJECT_ID:"
+    r"|HEADER_BLOCK_(?:START|END)\b"
+    r"|THUMBNAIL_BLOCK_(?:START|END)\b"
+    r"|EXECUTABLE_BLOCK_(?:START|END)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def strip_slicer_feature_comments(text: str) -> tuple[str, int]:
+    """
+    Remove slicer-emitted comments that no downstream consumer reads.
+    Preserves layer markers that BTT TFT firmware uses for the layer count
+    display (LAYER_CHANGE, LAYER_NUM, LAYER_COUNT, BEFORE/AFTER_LAYER_CHANGE).
+
+    Returns (new_text, dropped_count).
+    """
+    output: list[str] = []
+    dropped = 0
+    for line in text.splitlines(keepends=True):
+        if _FEATURE_COMMENT_RE.match(line):
+            dropped += 1
+            continue
+        output.append(line)
+    return "".join(output), dropped
+
+
+# Strip `; trailing comment` from lines that start with G or M. The
+# negative lookahead for M117/M118 protects display/notification messages
+# whose body could legitimately contain ';'.
+_INLINE_COMMENT_RE = re.compile(
+    r"^(\s*(?!M11[78]\b)[GM]\d+(?:\.\d+)?(?:[^;]*))\s*;.*$",
+    re.IGNORECASE,
+)
+
+
+def strip_inline_command_comments(text: str) -> tuple[str, int]:
+    """
+    Convert `G1 X10 ; some note` -> `G1 X10`. Standalone comment lines
+    (starting with `;`) are untouched here -- they're handled separately
+    by strip_slicer_feature_comments / strip_png_thumbnail_blocks or kept.
+
+    Returns (new_text, lines_modified).
+    """
+    output: list[str] = []
+    modified = 0
+    for line in text.splitlines(keepends=True):
+        match = _INLINE_COMMENT_RE.match(line)
+        if not match:
+            output.append(line)
+            continue
+        if line.endswith("\r\n"):
+            eol = "\r\n"
+        elif line.endswith("\n"):
+            eol = "\n"
+        else:
+            eol = ""
+        new_line = match.group(1).rstrip() + eol
+        if new_line != line:
+            modified += 1
+        output.append(new_line)
+    return "".join(output), modified
+
+
+# BTT thumbnail block markers. The header line is ";WWWWHHHH" (semicolon
+# followed by exactly 8 hex chars and nothing else). The block terminates
+# with our own "; bigtree thumbnail end" sentinel.
+_BTT_HEADER_RE = re.compile(r"^;[0-9a-fA-F]{8}\s*$")
+_BTT_END_RE = re.compile(r"^;\s*bigtree\s+thumbnail\s+end\b", re.IGNORECASE)
+
+
+def strip_existing_btt_thumbnail(text: str) -> tuple[str, int]:
+    """
+    Remove any prior `;WWWWHHHH ... ; bigtree thumbnail end` block at the
+    start of the file. Prevents doubling up the BTT thumbnail when this
+    script is run a second time on its own output.
+
+    Returns (new_text, blocks_dropped).
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines or not _BTT_HEADER_RE.match(lines[0]):
+        return text, 0
+
+    end_idx: int | None = None
+    for i, line in enumerate(lines):
+        if _BTT_END_RE.match(line):
+            end_idx = i
+            break
+
+    if end_idx is None:
+        # Looks like a BTT block start but no terminator found -- bail rather
+        # than risk deleting unrelated content.
+        return text, 0
+
+    # Drop [0, end_idx] plus a single trailing blank line if present, since
+    # render_thumbnail_block adds a "\r\n" gap after the sentinel.
+    drop_through = end_idx + 1
+    if drop_through < len(lines) and not lines[drop_through].strip():
+        drop_through += 1
+    return "".join(lines[drop_through:]), 1
+
+
+def collapse_blank_lines(text: str) -> tuple[str, int]:
+    """Drop blank/whitespace-only lines. Returns (new_text, dropped_count)."""
+    output: list[str] = []
+    dropped = 0
+    for line in text.splitlines(keepends=True):
+        if not line.strip():
+            dropped += 1
+            continue
+        output.append(line)
+    return "".join(output), dropped
+
+
+# ---------------------------------------------------------------------------
 # Output filename hint (matches BIQU script behavior)
 # ---------------------------------------------------------------------------
 
@@ -333,25 +573,49 @@ def write_output_name_hint(gcode_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def process_gcode(path: Path) -> None:
-    """Run both transformations on the file, in place."""
+    """Run all transformations on the file, in place."""
     # Read raw to preserve line endings as much as possible. The slicer
     # writes UTF-8; replacement on errors keeps us robust to odd bytes.
     text = path.read_text(encoding="utf-8", errors="replace")
+    original_size = len(text)
 
+    # If this file was already post-processed, drop the existing BTT
+    # thumbnail block so we don't stack a second one on top.
+    text, prior_btt_dropped = strip_existing_btt_thumbnail(text)
+
+    # Build the BTT thumbnail header first -- it reads the original PNG
+    # block, which subsequent passes are about to strip.
     thumbnail_header = build_thumbnail_header(text)
-    new_text, m73_count = inject_m73_notifications(text)
+
+    new_text = text
+    # Content rewrites first.
+    new_text, m73_count = inject_m73_notifications(new_text)
     new_text, m115_stripped = strip_m115_queries(new_text)
     new_text, m104_upgraded = upgrade_final_warmup_m104_to_m109(new_text)
-    final_text = thumbnail_header + new_text
+    new_text, m155_injected = inject_m155_throttle(new_text)
+    # Size reductions last -- they only remove bytes, never change semantics.
+    new_text, png_blocks_stripped = strip_png_thumbnail_blocks(new_text)
+    new_text, feature_cmts_stripped = strip_slicer_feature_comments(new_text)
+    new_text, inline_cmts_stripped = strip_inline_command_comments(new_text)
+    new_text, blanks_collapsed = collapse_blank_lines(new_text)
 
+    final_text = thumbnail_header + new_text
     path.write_text(final_text, encoding="utf-8")
     write_output_name_hint(path)
 
+    final_size = len(final_text)
+    delta_pct = (
+        (final_size - original_size) / original_size * 100
+        if original_size else 0.0
+    )
     has_thumb = "yes" if thumbnail_header else "no"
     print(f"[btt_postprocess] {path.name}: "
-          f"thumbnail={has_thumb}, M73 lines processed={m73_count}, "
-          f"M115 stripped={m115_stripped}, "
-          f"M104->M109 warmup fix={m104_upgraded}")
+          f"thumb={has_thumb} m73={m73_count} m115={m115_stripped} "
+          f"m104_fix={m104_upgraded} m155={m155_injected} "
+          f"png={png_blocks_stripped} feat={feature_cmts_stripped} "
+          f"inline={inline_cmts_stripped} blanks={blanks_collapsed} "
+          f"prior_btt={prior_btt_dropped} "
+          f"size={original_size}->{final_size} ({delta_pct:+.1f}%)")
 
 
 def main(argv: list[str]) -> int:

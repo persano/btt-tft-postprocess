@@ -4,11 +4,17 @@ import pytest
 
 from btt_postprocess import (
     M73_RE,
+    collapse_blank_lines,
     extract_png_from_gcode,
     format_time_left,
+    inject_m155_throttle,
     inject_m73_notifications,
     rgb_to_rgb565_hex,
+    strip_existing_btt_thumbnail,
+    strip_inline_command_comments,
     strip_m115_queries,
+    strip_png_thumbnail_blocks,
+    strip_slicer_feature_comments,
     upgrade_final_warmup_m104_to_m109,
 )
 
@@ -104,6 +110,18 @@ class TestInjectM73Notifications:
         gcode = "M73 P0 R60\r\nM73 P50 R30\r\nM73 P100 R0\r\n"
         _, count = inject_m73_notifications(gcode)
         assert count == 3
+
+    def test_idempotent_when_notifications_already_present(self):
+        # Second pass on already-processed gcode should not stack duplicates.
+        gcode = (
+            "M73 P25 R30\r\n"
+            "M118 P0 A1 action:notification Time Left 00h30m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 25/100\r\n"
+            "G1 X10\r\n"
+        )
+        result, count = inject_m73_notifications(gcode)
+        assert count == 0
+        assert result == gcode
 
 
 class TestExtractPngFromGcode:
@@ -260,3 +278,257 @@ class TestUpgradeFinalWarmupM104ToM109:
         result, count = upgrade_final_warmup_m104_to_m109(gcode)
         assert count == 1
         assert "M109 S220 ; set nozzle\r\n" in result
+
+
+class TestInjectM155Throttle:
+    def test_injects_before_first_executable(self):
+        gcode = "; metadata\r\n; more meta\r\nG28\r\nM104 S220\r\n"
+        result, count = inject_m155_throttle(gcode, interval_seconds=30)
+        assert count == 1
+        lines = result.splitlines(keepends=True)
+        assert lines[0] == "; metadata\r\n"
+        assert lines[1] == "; more meta\r\n"
+        assert lines[2] == "M155 S30\r\n"
+        assert lines[3] == "G28\r\n"
+
+    def test_skips_if_user_already_has_m155(self):
+        gcode = "M155 S5\r\nG28\r\nG1 X10 E5\r\n"
+        result, count = inject_m155_throttle(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_no_exec_lines_returns_unchanged(self):
+        gcode = "; just comments\r\n; nothing else\r\n"
+        result, count = inject_m155_throttle(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_lf_line_endings(self):
+        gcode = "G28\nG1 X10 E5\n"
+        result, count = inject_m155_throttle(gcode, interval_seconds=60)
+        assert count == 1
+        assert result.startswith("M155 S60\n")
+        assert "\r\n" not in result
+
+    def test_skip_if_m155_in_warmup_only(self):
+        # M155 in the print body (after first extrusion) shouldn't block
+        # injection -- that's a different concern.
+        gcode = "G28\r\nG1 X10 E5\r\nM155 S5\r\n"
+        result, count = inject_m155_throttle(gcode)
+        assert count == 1
+        # injected before G28
+        assert result.splitlines()[0] == "M155 S30"
+
+
+class TestStripPngThumbnailBlocks:
+    def test_strips_single_block(self):
+        gcode = (
+            "G28\r\n"
+            "; thumbnail begin 70x70 1036\r\n"
+            "; AAAAAAAAAAAAAAA\r\n"
+            "; BBBBBBBBBBBBBBB\r\n"
+            "; thumbnail end\r\n"
+            "G1 X10\r\n"
+        )
+        result, blocks = strip_png_thumbnail_blocks(gcode)
+        assert blocks == 1
+        assert "thumbnail begin" not in result
+        assert "thumbnail end" not in result
+        assert "AAAA" not in result
+        assert "G28\r\n" in result
+        assert "G1 X10\r\n" in result
+
+    def test_strips_multiple_variants(self):
+        gcode = (
+            "; thumbnail begin 70x70 100\r\n; data\r\n; thumbnail end\r\n"
+            "; thumbnail_QOI begin 200x200 5000\r\n; data\r\n; thumbnail_QOI end\r\n"
+            "; thumbnail_JPG begin 400x400 9999\r\n; data\r\n; thumbnail_JPG end\r\n"
+            "G28\r\n"
+        )
+        result, blocks = strip_png_thumbnail_blocks(gcode)
+        assert blocks == 3
+        assert "thumbnail" not in result
+        assert "G28\r\n" in result
+
+    def test_no_thumbnail_returns_unchanged(self):
+        gcode = "G28\r\nG1 X10\r\n"
+        result, blocks = strip_png_thumbnail_blocks(gcode)
+        assert blocks == 0
+        assert result == gcode
+
+    def test_does_not_strip_bigtree_marker(self):
+        # Our own "; bigtree thumbnail end" sentinel must survive.
+        gcode = "; bigtree thumbnail end\r\nG28\r\n"
+        result, blocks = strip_png_thumbnail_blocks(gcode)
+        assert blocks == 0
+        assert "bigtree" in result
+
+
+class TestStripSlicerFeatureComments:
+    def test_strips_type_marker(self):
+        gcode = ";TYPE:Outer wall\r\nG1 X10\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 1
+        assert "TYPE:" not in result
+        assert "G1 X10\r\n" in result
+
+    def test_strips_width_height_z(self):
+        gcode = ";WIDTH:0.42\r\n;HEIGHT:0.2\r\n;Z:0.2\r\nG1 X10\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 3
+        assert "G1 X10\r\n" in result
+
+    def test_preserves_layer_change(self):
+        gcode = ";LAYER_CHANGE\r\n;BEFORE_LAYER_CHANGE\r\n;AFTER_LAYER_CHANGE\r\nG1 X10\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 0
+        assert "LAYER_CHANGE\r\n" in result
+        assert "BEFORE_LAYER_CHANGE\r\n" in result
+        assert "AFTER_LAYER_CHANGE\r\n" in result
+
+    def test_strips_change_layer_distinct_from_layer_change(self):
+        gcode = ";CHANGE_LAYER\r\n;LAYER_CHANGE\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 1
+        assert ";LAYER_CHANGE\r\n" in result
+        assert ";CHANGE_LAYER" not in result
+
+    def test_strips_orca_block_markers(self):
+        gcode = (
+            "; HEADER_BLOCK_START\r\n; HEADER_BLOCK_END\r\n"
+            "; THUMBNAIL_BLOCK_START\r\n; THUMBNAIL_BLOCK_END\r\n"
+            "; EXECUTABLE_BLOCK_START\r\n; EXECUTABLE_BLOCK_END\r\n"
+            "G28\r\n"
+        )
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 6
+        assert "G28\r\n" in result
+
+    def test_strips_wipe_markers(self):
+        gcode = ";WIPE_START\r\n;WIPE_END\r\nG1 X10\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 2
+
+    def test_does_not_touch_g_m_lines(self):
+        gcode = "G1 X10\r\nM104 S220\r\nG28\r\n"
+        result, count = strip_slicer_feature_comments(gcode)
+        assert count == 0
+        assert result == gcode
+
+
+class TestStripInlineCommandComments:
+    def test_strips_trailing_comment(self):
+        gcode = "G1 X10 Y10 ; move to start\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 1
+        assert result == "G1 X10 Y10\r\n"
+
+    def test_preserves_standalone_comment(self):
+        gcode = "; just a comment\r\nG28\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_preserves_m117(self):
+        # M117 display message may legitimately contain ';'
+        gcode = "M117 Hello;World\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_preserves_m118(self):
+        gcode = "M118 P0 A1 action:notification something;else\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_no_comment_unchanged(self):
+        gcode = "G1 X10 Y10\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_strips_comment_without_space_before_semicolon(self):
+        gcode = "G92 E0; reset extruder\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 1
+        assert result == "G92 E0\r\n"
+
+    def test_handles_lf_endings(self):
+        gcode = "G1 X10 ; foo\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 1
+        assert result == "G1 X10\n"
+
+    def test_handles_m104_dot_variant(self):
+        gcode = "M104.1 S220 ; filament change\r\n"
+        result, count = strip_inline_command_comments(gcode)
+        assert count == 1
+        assert result == "M104.1 S220\r\n"
+
+
+class TestStripExistingBttThumbnail:
+    def test_strips_full_btt_block(self):
+        gcode = (
+            ";00460046\r\n"
+            ";0000000000000000\r\n"
+            ";ffffffffffffffff\r\n"
+            "; bigtree thumbnail end\r\n"
+            "\r\n"
+            "G28\r\n"
+        )
+        result, dropped = strip_existing_btt_thumbnail(gcode)
+        assert dropped == 1
+        assert result == "G28\r\n"
+
+    def test_strips_without_trailing_blank(self):
+        gcode = (
+            ";00460046\r\n"
+            ";0000\r\n"
+            "; bigtree thumbnail end\r\n"
+            "G28\r\n"
+        )
+        result, dropped = strip_existing_btt_thumbnail(gcode)
+        assert dropped == 1
+        assert result == "G28\r\n"
+
+    def test_no_btt_block_unchanged(self):
+        gcode = "; FLAVOR: Marlin\r\nG28\r\n"
+        result, dropped = strip_existing_btt_thumbnail(gcode)
+        assert dropped == 0
+        assert result == gcode
+
+    def test_orca_thumbnail_does_not_trigger(self):
+        # Orca's PNG block starts with "; thumbnail begin ...", NOT a hex
+        # header. Our regex should not match it.
+        gcode = "; thumbnail begin 70x70 1036\r\n; abc\r\n; thumbnail end\r\n"
+        result, dropped = strip_existing_btt_thumbnail(gcode)
+        assert dropped == 0
+        assert result == gcode
+
+    def test_missing_end_marker_is_safe(self):
+        # Hex header but no terminator -- refuse to nuke unrelated content.
+        gcode = ";00460046\r\n;0000\r\nG28\r\n"
+        result, dropped = strip_existing_btt_thumbnail(gcode)
+        assert dropped == 0
+        assert result == gcode
+
+
+class TestCollapseBlankLines:
+    def test_drops_blank_lines(self):
+        gcode = "G28\r\n\r\nG1 X10\r\n\r\n\r\nG1 X20\r\n"
+        result, dropped = collapse_blank_lines(gcode)
+        assert dropped == 3
+        assert result == "G28\r\nG1 X10\r\nG1 X20\r\n"
+
+    def test_drops_whitespace_only_lines(self):
+        gcode = "G28\r\n   \r\nG1 X10\r\n"
+        result, dropped = collapse_blank_lines(gcode)
+        assert dropped == 1
+        assert result == "G28\r\nG1 X10\r\n"
+
+    def test_no_blanks_unchanged(self):
+        gcode = "G28\r\nG1 X10\r\n"
+        result, dropped = collapse_blank_lines(gcode)
+        assert dropped == 0
+        assert result == gcode

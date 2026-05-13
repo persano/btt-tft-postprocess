@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+Beagle-compatibility fixes:
+
 - Strip `M115` firmware-info queries from the file. Their multi-line response
   can race with `M105` temperature polls on hosts that proxy the serial line
   (Mintion Beagle, some ESP3D variants) and overflow the host's RX buffer
@@ -12,6 +14,33 @@
   hotend has reached temperature. Skips `M104 S0` cool-downs, `M104.1`
   filament-change variants, and any `M104` that already has a following
   `M109` wait or appears after the first extrusion move.
+- Inject `M155 S30` before the first executable command to throttle
+  Marlin's automatic temperature auto-reports from 5s (default) to 30s.
+  Cuts serial traffic ~6x and is the other half of the Beagle
+  buffer-overflow story. Skipped if the user already has an `M155` in
+  the warmup region.
+
+Size reduction:
+
+- Strip the slicer's base64 PNG thumbnail block(s) after extracting the
+  bitmap for the BTT TFT. Removes 50-200 KB of dead-weight base64.
+- Strip slicer "feature" comments that no firmware consumer reads:
+  `;TYPE:`, `;WIDTH:`, `;HEIGHT:`, `;Z:`, wipe markers, object IDs, and
+  Orca's HEADER/THUMBNAIL/EXECUTABLE block delimiters. Preserves
+  `LAYER_CHANGE` / `LAYER_COUNT` which BTT TFT firmware does read.
+- Strip the trailing `; comment` portion of G/M command lines
+  (`G1 X10 ; whatever` -> `G1 X10`). Leaves standalone comments and
+  M117/M118 display messages alone.
+- Drop blank lines.
+
+Idempotency:
+
+- Strip any pre-existing BTT thumbnail block at the top of the file
+  before prepending a fresh one. Re-running the script on its own
+  output no longer doubles the thumbnail.
+- Skip `M118 action:notification` injection if a notification already
+  follows the `M73` line. Re-running no longer stacks duplicate
+  notification pairs.
 
 ## v0.1.0 — 2025-05-03
 
