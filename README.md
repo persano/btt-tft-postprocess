@@ -99,9 +99,10 @@ Every pass runs in one read/write cycle. After running you'll see a status
 line in the slicer log:
 
 ```
-[btt_postprocess] file.gcode: thumb=yes m73=113 m115=0 m104_fix=0 m155=1
-  init_notif=1 end_notif=1 png=1 cfg=610 feat=186 inline=38 minify=7
-  cmt_ws=98 ws=1 blanks=720 prior_btt=0 size=724844->495680 (-31.6%)
+[btt_postprocess] file.gcode: thumb=yes m73=113 m115=0 m104_fix=0 lc=1
+  head_keys=2 m155=1 init_notif=1 end_notif=1 throttle=2 png=1 cfg=0
+  feat=186 inline=38 minify=7 cmt_ws=98 ws=1 blanks=720 prior_btt=0
+  size=724844->495680 (-31.6%)
 ```
 
 The passes group into three categories:
@@ -113,6 +114,7 @@ The passes group into three categories:
 | BTT thumbnail conversion | Resizes the slicer's PNG to the four sizes BTT firmware expects (70×70, 95×80, 95×95, 160×140), converts each to RGB565 hex, prepends the result to the file. The TFT can't show a preview without this. |
 | `M73` → `M118` notifications | After every `M73 P<%> R<minutes>` the slicer emits, injects `M118 P0 A1 action:notification Time Left HHhMMm00s` and `Data Left <%>/100`. These drive the TFT's time-left countdown and progress bar. |
 | Inject `;LAYER_COUNT:N` | BTT TFT firmware and the Mintion Beagle web UI look for the PrusaSlicer/Cura canonical `;LAYER_COUNT:N` to populate their "X / N Layers" tile. Orca writes `; total layer number: N` instead, which neither parser recognizes (the total reads as 0 even though the data is in the file). The script reads N from Orca's line and inserts a sibling `;LAYER_COUNT:N` immediately after. Orca's original is preserved. |
+| Duplicate trailer keys at the head | On large Orca slices (~75 MB+) Beagle's metadata scan times out before reaching the trailer summary and CONFIG_BLOCK at end-of-file, so the "X / N Layers" and model-height tiles read 0 even though every marker is in the file. The script copies `; total layers count = N` and `; layer_height = X` up to right after `; HEADER_BLOCK_END` so the head-scan finds them. Originals at end-of-file are preserved. |
 | Start-of-print notification ordering | Slicer start gcode normally fires `M73` BEFORE `action:print_start`. The TFT only opens the print screen on `print_start`, so the initial "Time Left / Data Left" pair would be invisible. The script moves a fresh pair to immediately AFTER `print_start`. |
 | End-of-print notification ordering | Slicer end gcode normally fires `action:print_end` BEFORE the final `M73 P100 R0`. The TFT dismisses the print screen on `print_end`, so the 100% / 00:00 state never shows. The script inserts a fresh "100/100, 00h00m00s" pair immediately BEFORE `print_end` and drops stale notifications on the wrong side of either anchor. |
 
@@ -123,6 +125,7 @@ The passes group into three categories:
 | Strip `M115` | The firmware-info query has no effect on a print, but its multi-line response races with `M105` polls on hosts that proxy the serial line (Mintion Beagle, some ESP3D variants) and can overflow the host's RX buffer during startup. |
 | `M104` → `M109` warmup fix | If the slicer's auto-generated header sets the nozzle with `M104` but never waits with `M109`, the print starts moving before the hotend reaches temperature. The script upgrades the final pre-print `M104 S>0` to `M109`. Works around OrcaSlicer issues [#2334](https://github.com/OrcaSlicer/OrcaSlicer/issues/2334) and [#4337](https://github.com/OrcaSlicer/OrcaSlicer/issues/4337). |
 | Inject `M155 S30` | Marlin's default temperature auto-report interval is 5s. Raising it to 30s cuts serial traffic ~6x and is the other half of preventing Beagle buffer overflows. Skipped if your start gcode already manages `M155`. |
+| Inject `M154 S0` at print start | The BTT TFT firmware enables Marlin's position auto-report (`M154 S1`) during its init handshake so it can drive the on-screen position display. On hosts that proxy the serial line (Mintion Beagle), the resulting 1 Hz X/Y/Z dump can pile onto temperature traffic and acks until the wire deadlocks mid-print — host retransmits indefinitely, no `ok` comes back. The script injects `M154 S0` immediately after `action:print_start` to disable the auto-reporter for the print body; explicit `M114` queries from the TFT/Beagle keep working. Also re-emits `M155 S<interval>` at the same anchor in case anything in start gcode reset it. |
 
 ### Size reduction (typically ~30% smaller files on Orca output)
 
@@ -166,7 +169,9 @@ CRCRLF handling is also always-on — it's a correctness fix.
 | `ENABLE_STRIP_M115` | `True` | Strip `M115` firmware-info queries. Disable if you actually want their response for some reason. |
 | `ENABLE_M104_TO_M109_WARMUP_FIX` | `True` | Upgrade the final pre-print `M104 S>0` to `M109` when the slicer's auto-header forgot to wait. Disable if your start gcode handles waits itself and you'd rather the script not touch them. |
 | `ENABLE_INJECT_LAYER_COUNT_MARKER` | `True` | Inject `;LAYER_COUNT:N` alongside Orca's `; total layer number: N` so BTT firmware / Beagle web UI see the layer total. Disable if you're on a slicer that already emits `;LAYER_COUNT:` (PrusaSlicer, Cura — injection is a no-op there anyway). |
+| `ENABLE_DUPLICATE_TRAILER_KEYS_AT_HEAD` | `True` | Copy `; total layers count = N` (Orca trailer) and `; layer_height = X` (Orca CONFIG_BLOCK) up next to `; HEADER_BLOCK_END`. On large Orca files (~75 MB+), those keys live tens of megabytes from end-of-file, past where Beagle's metadata scan reads. Without this, the "X / N Layers" and model-height tiles read 0 even though every marker is intact. Originals at end-of-file are preserved. |
 | `M155_INTERVAL_SECONDS` | `30` | Seconds between Marlin's auto temperature reports. Lower = faster temp updates in the Beagle app, more serial traffic. Higher = less traffic, slower display. Set to `0` to skip injection entirely (printer keeps Marlin's 5s default). |
+| `ENABLE_THROTTLE_AUTOREPORTS_AT_PRINT_START` | `False` | Right after `action:print_start`, re-emit `M154 S0` (disable Marlin position auto-reports) and `M155 S<interval>` (reassert temp auto-report rate). The BTT TFT firmware turns M154 S1 on during init; on hosts that proxy the serial line (Mintion Beagle) the resulting 1 Hz position stream can deadlock the protocol mid-print. **Default flipped off in v0.2.5** because the `M154 S0` injection broke SD-card prints on stock Artillery firmware (which doesn't compile in M154 support). Enable manually if you're on a Marlin build that supports M154 and want the Beagle mitigation. |
 
 ### TFT notification ordering
 

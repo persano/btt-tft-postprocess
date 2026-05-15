@@ -1,5 +1,81 @@
 # Changelog
 
+## v0.2.5 — 2026-05-15
+
+Revert default:
+
+- **`ENABLE_THROTTLE_AUTOREPORTS_AT_PRINT_START` defaults to `False`
+  (was `True` in v0.2.4).** v0.2.4's `M154 S0` injection after
+  `action:print_start` was reported to break SD-card prints --
+  symptom: the printer ran start gcode (home, bed level, prime line)
+  and immediately ran end gcode, skipping the entire print body.
+  Likely cause: stock Artillery firmware ships with
+  `AUTO_REPORT_POSITION` commented out, so the M154 handler isn't
+  compiled in; how exactly that triggers the "skip print body" failure
+  hasn't been isolated yet, but the safest immediate action is to
+  revert the default. The feature stays available for users on a
+  Marlin build that supports M154 and who want the Beagle
+  stuck-print mitigation -- flip the flag back to True manually.
+- No code logic changed; the pass still does the same thing when
+  enabled, and v0.2.4's tests all still pass.
+
+## v0.2.4 — 2026-05-15
+
+Bug fix:
+
+- **Inject `M154 S0` immediately after `action:print_start`** to
+  disable Marlin's position auto-report stream for the duration of
+  the print. The BTT TFT firmware enables `M154 S1` during its init
+  handshake so it can keep its on-screen position display fresh; on
+  hosts that proxy the serial line (Mintion Beagle), the resulting
+  1 Hz X/Y/Z dump piles onto the regular ack/temperature traffic
+  and can deadlock the serial protocol mid-print. Symptom seen in
+  a Beagle console capture: the host stuck retransmitting
+  `N87272` forever, no `ok` coming back from Marlin. M154 S0 only
+  affects Marlin's *automatic* reporter; explicit `M114` queries
+  from the TFT / Beagle keep working as before. Re-emitting after
+  `action:print_start` (the latest reliable point in the start
+  sequence) wins against anything earlier that turned it on.
+- **Re-emit `M155 S<interval>` at the same anchor.** The original
+  injection lands "before the first executable command", which is
+  early enough that the host or slicer's start gcode can still
+  override it (some hosts reset M155 on connect). Reapplying after
+  `action:print_start` makes the interval stick for the actual
+  print body.
+- Both lines sit AFTER the start-of-print notification pair so the
+  TFT still sees the time-left / data-left notifications first.
+  Behavior is gated by `ENABLE_THROTTLE_AUTOREPORTS_AT_PRINT_START`.
+  Idempotent on re-runs.
+
+## v0.2.3 — 2026-05-15
+
+Bug fix:
+
+- **Duplicate `; total layers count = N` and `; layer_height = X` near
+  the head of the file** so the Mintion Beagle web UI's metadata scan
+  finds them. On Orca slices large enough for the print body to push
+  the trailer summary and `CONFIG_BLOCK_START` tens of megabytes into
+  the file (~75 MB+ in practice), Beagle's file-select metadata scan
+  apparently times out before reaching either marker. Result: the
+  "X / N Layers" and model-height tiles both read 0 even though every
+  marker the v0.2.2 fix preserves is still in the file. Symptom on
+  BIN_PLA_18h54m.gcode (73.7 MB, 794 layers): tiles showed "60/0
+  Layers" and "14.36/0.00 mm" — live-stream markers updating, totals
+  stuck at 0. v0.2.2 was sufficient for normal-sized files because the
+  trailer + config sit only a few KB from EOF and Beagle reaches them
+  fine. The fix copies both keys to right after `; HEADER_BLOCK_END`,
+  preserving the originals at end-of-file for any parser that reads
+  from there. Gated by `ENABLE_DUPLICATE_TRAILER_KEYS_AT_HEAD = True`.
+  Fallbacks: if the trailer line is missing the layer count is
+  derived from `; total layer number: N` in the HEADER_BLOCK; if the
+  CONFIG_BLOCK has no `layer_height` the value is computed as
+  `max_z_height / total_layers`.
+- **Preserve leading whitespace on the head-injected `; layer_height
+  = X` line.** Beagle is strict about the canonical "; " prefix on
+  this key; without explicit preservation `strip_comment_leading_
+  whitespace` would minify our head-injected copy to `;layer_height
+  = X` and the Beagle parser would silently fail to match it.
+
 ## v0.2.2 — 2026-05-13
 
 Bug fixes (all in service of the same symptom: the "X / N Layers" tile

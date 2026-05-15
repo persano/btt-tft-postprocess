@@ -4,7 +4,7 @@ build-backend = "setuptools.backends.legacy:build"
 
 [project]
 name = "btt-postprocess"
-version = "0.1.0"
+version = "0.2.5"
 description = "Orca/PrusaSlicer post-processing script for BIGTREETECH TFT screens"
 readme = "README.md"
 license = {text = "MIT"}

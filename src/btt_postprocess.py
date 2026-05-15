@@ -130,10 +130,42 @@ ENABLE_INJECT_LAYER_COUNT_MARKER = True
 # "X / N Layers" tile; Orca's wording isn't recognized by either, so the
 # total shows as 0 without this. Orca's original line is preserved.
 
+ENABLE_DUPLICATE_TRAILER_KEYS_AT_HEAD = True
+# Copy `; total layers count = N` (Orca trailer summary) and
+# `; layer_height = X` (Orca CONFIG_BLOCK) up near the HEADER_BLOCK so
+# the Mintion Beagle parser finds them during its head-scan. On large
+# Orca files (~75 MB+) those keys live tens of megabytes into the file
+# and Beagle never reaches them, so the "X / N Layers" and model-height
+# tiles read 0 even though the data is all present. Originals are
+# preserved. No-op if either key is missing entirely or already
+# duplicated near the head (idempotent on re-runs).
+
 M155_INTERVAL_SECONDS = 30
 # Marlin's auto temp-report interval. Default Marlin behavior is 5s; raising
 # this cuts serial traffic ~6x and helps Beagle keep up. Set to 0 to skip
 # injection entirely (your printer keeps Marlin's 5s default).
+
+ENABLE_THROTTLE_AUTOREPORTS_AT_PRINT_START = False
+# **Default flipped OFF in v0.2.5** -- reports of broken SD-card prints
+# after v0.2.4 enabled this by default, likely because Marlin builds
+# without AUTO_REPORT_POSITION compiled in (stock Artillery firmware)
+# treat M154 as an unknown command. Standard Marlin echoes
+# "Unknown command:" and continues, but some hosts/firmwares appear
+# to react to it in a way that aborts the SD print. Until the failure
+# mode is identified, the safer default is OFF; users who specifically
+# want the Beagle stuck-print mitigation can flip this back on.
+#
+# When True: right after the TFT/Beagle has opened the print screen
+# (the `action:print_start` anchor), reassert two serial-traffic
+# throttles:
+#   - `M154 S0` to disable Marlin's position auto-reports. The BTT TFT
+#     firmware enables M154 S1 during its init handshake so it can
+#     track the toolhead for its UI; on hosts that proxy the serial
+#     line (Mintion Beagle), the resulting 1 Hz position dump can
+#     deadlock the protocol when combined with other traffic.
+#   - `M155 S<interval>` to reassert the temperature auto-report
+#     interval set above, in case the slicer's start gcode or the
+#     host's init reset it.
 
 # --- TFT notification ordering -------------------------------------------
 ENABLE_REORDER_INIT_NOTIFICATIONS = True
@@ -510,6 +542,123 @@ def inject_layer_count_marker(text: str) -> tuple[str, int]:
     return "".join(lines), 1
 
 
+# The trailer-summary "total layers count" line Orca emits just before
+# CONFIG_BLOCK_START, and the CONFIG_BLOCK key Beagle reads to compute
+# the layer-total tile. On normal-sized prints both live a few KB from
+# end-of-file and Beagle finds them; on large prints (tens of MB) they
+# fall outside Beagle's metadata head-scan budget and the tiles read 0.
+_TOTAL_LAYERS_COUNT_TRAILER_RE = re.compile(
+    r"^;\s*total\s+layers\s+count\s*=\s*(?P<n>\d+)", re.IGNORECASE,
+)
+_LAYER_HEIGHT_KV_RE = re.compile(
+    r"^;\s*layer_height\s*=\s*(?P<h>[\d.]+)", re.IGNORECASE,
+)
+_MAX_Z_HEIGHT_RE = re.compile(
+    r"^;\s*max_z_height\s*:\s*(?P<z>[\d.]+)", re.IGNORECASE,
+)
+
+
+def duplicate_trailer_keys_at_head(text: str) -> tuple[str, int]:
+    """
+    On very large Orca files (tens of MB), the Mintion Beagle web UI's
+    metadata scan times out before it can reach the trailer summary
+    (`; total layers count = N`) and the CONFIG_BLOCK (`; layer_height
+    = X`) at end-of-file. Result: the "X / N Layers" tile and the
+    model-height tile both read 0 even though the data is intact in
+    the file.
+
+    Mitigation: copy both keys up near `; HEADER_BLOCK_END` so the
+    head-scan finds them. The originals at end-of-file are preserved
+    for any parser that reads from there.
+
+    Fallbacks:
+      - Total layers: if no trailer line exists, derive N from
+        `; total layer number: N` in the HEADER_BLOCK.
+      - Layer height: if no CONFIG_BLOCK key exists, compute as
+        max_z_height / total_layers (accurate to ~1 layer on prints
+        with uniform layer height).
+
+    Idempotent: skips insertion if equivalent duplicates already sit
+    between file start and HEADER_BLOCK_END.
+
+    Returns (new_text, lines_inserted).
+    """
+    lines = text.splitlines(keepends=True)
+
+    insert_at: int | None = None
+    for i, line in enumerate(lines):
+        if _HEADER_BLOCK_END_RE.match(line):
+            insert_at = i + 1
+            break
+    if insert_at is None:
+        return text, 0
+
+    # Idempotency: are our two duplicates already adjacent to the
+    # insertion anchor? Only treat as "already injected" if both keys
+    # sit contiguously right after HEADER_BLOCK_END (allowing only a
+    # single `;LAYER_COUNT:N` line from the sibling pass between).
+    # This is strict on purpose: it avoids matching the natural
+    # trailer/CONFIG_BLOCK lines in unusually compact files.
+    have_total_layers = False
+    have_layer_height = False
+    j = insert_at
+    if j < len(lines) and _LAYER_COUNT_RE.match(lines[j]):
+        j += 1
+    if j < len(lines) and _TOTAL_LAYERS_COUNT_TRAILER_RE.match(lines[j]):
+        have_total_layers = True
+        j += 1
+    if j < len(lines) and _LAYER_HEIGHT_KV_RE.match(lines[j]):
+        have_layer_height = True
+    if have_total_layers and have_layer_height:
+        return text, 0
+
+    total_layers: str | None = None
+    layer_height: str | None = None
+    for line in lines[insert_at:]:
+        if total_layers is None:
+            m = _TOTAL_LAYERS_COUNT_TRAILER_RE.match(line)
+            if m:
+                total_layers = m.group("n")
+        if layer_height is None:
+            m = _LAYER_HEIGHT_KV_RE.match(line)
+            if m:
+                layer_height = m.group("h")
+        if total_layers is not None and layer_height is not None:
+            break
+
+    if total_layers is None:
+        for line in lines[:insert_at]:
+            m = _TOTAL_LAYER_NUMBER_RE.match(line)
+            if m:
+                total_layers = m.group("n")
+                break
+
+    if layer_height is None and total_layers is not None:
+        for line in lines[:insert_at]:
+            m = _MAX_Z_HEIGHT_RE.match(line)
+            if m:
+                try:
+                    computed = float(m.group("z")) / int(total_layers)
+                    if computed > 0:
+                        layer_height = f"{computed:.4f}".rstrip("0").rstrip(".")
+                except (ValueError, ZeroDivisionError):
+                    pass
+                break
+
+    eol = "\r\n" if lines[insert_at - 1].endswith("\r\n") else "\n"
+    injection: list[str] = []
+    if total_layers is not None and not have_total_layers:
+        injection.append(f"; total layers count = {total_layers}{eol}")
+    if layer_height is not None and not have_layer_height:
+        injection.append(f"; layer_height = {layer_height}{eol}")
+
+    if not injection:
+        return text, 0
+
+    lines[insert_at:insert_at] = injection
+    return "".join(lines), len(injection)
+
+
 def upgrade_final_warmup_m104_to_m109(text: str) -> tuple[str, int]:
     """
     Walk the file until the first extrusion move. Within that warmup window,
@@ -673,6 +822,75 @@ def move_final_notifications_before_print_end(text: str) -> tuple[str, int]:
     print_end_line = lines[print_end_idx]
 
     return "".join(before + final_notifs + [print_end_line] + after), 1
+
+
+# Matchers for the auto-report-throttle pass. M154 S0 disables Marlin's
+# position auto-report; M155 S<n> sets the temperature auto-report
+# interval. Both default to "off" / "5s" at boot, but the BTT TFT
+# firmware turns M154 on during its init and various clients fiddle
+# with M155 -- we reassert them right after action:print_start.
+_M154_S0_RE = re.compile(r"^\s*M154\s+.*\bS\s*0\b", re.IGNORECASE)
+
+
+def throttle_autoreports_after_print_start(
+    text: str, m155_interval: int = M155_INTERVAL_SECONDS,
+) -> tuple[str, int]:
+    """
+    Insert `M154 S0` (and optionally `M155 S<interval>`) immediately
+    after the slicer's `M118 action:print_start` line, scanning past
+    any notification pair left by the start-of-print reorder pass so
+    the time-left / data-left notifications still come first on the
+    wire.
+
+    Why here, not earlier: anything that's going to override M154 /
+    M155 (TFT init, Beagle handshake, slicer's own start gcode) has
+    already done so by the time `action:print_start` fires. Reapplying
+    at this anchor wins.
+
+    Idempotent: if equivalent lines are already adjacent to the anchor
+    (after the notification pair), no new lines are inserted.
+
+    Returns (new_text, lines_inserted).
+    """
+    lines = text.splitlines(keepends=True)
+    print_start_idx: int | None = None
+    for i, line in enumerate(lines):
+        if _PRINT_START_RE.search(line):
+            print_start_idx = i
+            break
+    if print_start_idx is None:
+        return text, 0
+
+    j = print_start_idx + 1
+    while j < len(lines) and _NOTIFICATION_RE.search(lines[j]):
+        j += 1
+
+    have_m154 = False
+    have_m155 = False
+    peek_end = min(j + 4, len(lines))
+    for k in range(j, peek_end):
+        if _M154_S0_RE.match(lines[k]):
+            have_m154 = True
+        elif _M155_RE.match(lines[k]):
+            have_m155 = True
+
+    want_m155 = m155_interval > 0
+
+    if have_m154 and (have_m155 or not want_m155):
+        return text, 0
+
+    eol = "\r\n" if lines[print_start_idx].endswith("\r\n") else "\n"
+    injection: list[str] = []
+    if not have_m154:
+        injection.append(f"M154 S0{eol}")
+    if want_m155 and not have_m155:
+        injection.append(f"M155 S{m155_interval}{eol}")
+
+    if not injection:
+        return text, 0
+
+    lines[j:j] = injection
+    return "".join(lines), len(injection)
 
 
 # ---------------------------------------------------------------------------
@@ -980,6 +1198,10 @@ _PRESERVE_LEADING_WS_RE = re.compile(
     r"|total filament\b"
     r"|total layers count\b"
     r"|estimated (?:printing|first layer)\b"
+    # CONFIG_BLOCK key the head-injection pass duplicates near the
+    # HEADER_BLOCK. Inside the CONFIG_BLOCK the state-machine skip
+    # below handles it; at the head it needs explicit preservation.
+    r"|layer_height\s*="
     # Config-block sentinels (block contents are stripped by a separate
     # pass; the sentinels themselves stay byte-identical if they survive)
     r"|CONFIG_BLOCK_(?:START|END)\b"
@@ -1139,6 +1361,10 @@ def process_gcode(path: Path) -> None:
         inject_layer_count_marker(new_text)
         if ENABLE_INJECT_LAYER_COUNT_MARKER else (new_text, 0)
     )
+    new_text, head_keys_injected = (
+        duplicate_trailer_keys_at_head(new_text)
+        if ENABLE_DUPLICATE_TRAILER_KEYS_AT_HEAD else (new_text, 0)
+    )
     new_text, m155_injected = inject_m155_throttle(new_text)
     new_text, init_notif_moved = (
         move_initial_notifications_after_print_start(new_text)
@@ -1147,6 +1373,10 @@ def process_gcode(path: Path) -> None:
     new_text, end_notif_moved = (
         move_final_notifications_before_print_end(new_text)
         if ENABLE_REORDER_FINAL_NOTIFICATIONS else (new_text, 0)
+    )
+    new_text, autoreport_throttled = (
+        throttle_autoreports_after_print_start(new_text)
+        if ENABLE_THROTTLE_AUTOREPORTS_AT_PRINT_START else (new_text, 0)
     )
     # Size reductions last -- they only remove bytes, never change semantics.
     new_text, png_blocks_stripped = (
@@ -1198,8 +1428,9 @@ def process_gcode(path: Path) -> None:
     print(f"[btt_postprocess] {path.name}: "
           f"thumb={has_thumb} m73={m73_count} m115={m115_stripped} "
           f"m104_fix={m104_upgraded} lc={layer_count_injected} "
-          f"m155={m155_injected} "
+          f"head_keys={head_keys_injected} m155={m155_injected} "
           f"init_notif={init_notif_moved} end_notif={end_notif_moved} "
+          f"throttle={autoreport_throttled} "
           f"png={png_blocks_stripped} cfg={config_block_dropped} "
           f"feat={feature_cmts_stripped} inline={inline_cmts_stripped} "
           f"minify={minified_lines} cmt_ws={cmt_ws_stripped} ws={ws_trimmed} "

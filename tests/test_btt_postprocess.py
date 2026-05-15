@@ -5,6 +5,7 @@ import pytest
 from btt_postprocess import (
     M73_RE,
     collapse_blank_lines,
+    duplicate_trailer_keys_at_head,
     extract_png_from_gcode,
     format_time_left,
     inject_layer_count_marker,
@@ -22,6 +23,7 @@ from btt_postprocess import (
     strip_slicer_config_block,
     strip_slicer_feature_comments,
     strip_trailing_whitespace,
+    throttle_autoreports_after_print_start,
     upgrade_final_warmup_m104_to_m109,
 )
 
@@ -357,6 +359,165 @@ class TestInjectLayerCountMarker:
         result, count = inject_layer_count_marker(gcode)
         assert count == 0
         assert result == gcode
+
+
+class TestDuplicateTrailerKeysAtHead:
+    # The Mintion Beagle web UI scans for metadata at file-select time.
+    # On Orca files >~75 MB its scan times out before reaching the
+    # trailer summary and CONFIG_BLOCK at end-of-file, so the
+    # "X / N Layers" and model-height tiles read 0. This pass copies
+    # the two trailer/config keys Beagle needs up next to the
+    # HEADER_BLOCK so the head-scan finds them.
+
+    def test_duplicates_both_keys_after_header_block_end(self):
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 794\r\n"
+            "; max_z_height: 190.52\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+            "; total layers count = 794\r\n"
+            "; CONFIG_BLOCK_START\r\n"
+            "; layer_height = 0.2\r\n"
+            "; CONFIG_BLOCK_END\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+        lines = result.splitlines(keepends=True)
+        header_end_idx = next(
+            i for i, line in enumerate(lines) if "HEADER_BLOCK_END" in line
+        )
+        assert lines[header_end_idx + 1] == "; total layers count = 794\r\n"
+        assert lines[header_end_idx + 2] == "; layer_height = 0.2\r\n"
+        # Originals stay in place.
+        assert result.count("; total layers count = 794\r\n") == 2
+        assert result.count("; layer_height = 0.2\r\n") == 2
+
+    def test_preserves_canonical_leading_space(self):
+        # Beagle is strict about the "; " (semicolon + space) prefix on
+        # these keys -- the parser regexes don't match the "; " stripped
+        # form. The injected lines must use the canonical form.
+        gcode = (
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+            "G1 X10\r\n"
+            "; total layers count = 100\r\n"
+            "; CONFIG_BLOCK_START\r\n"
+            "; layer_height = 0.16\r\n"
+            "; CONFIG_BLOCK_END\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+        assert "; total layers count = 100\r\n" in result
+        assert "; layer_height = 0.16\r\n" in result
+
+    def test_falls_back_to_total_layer_number_when_no_trailer_summary(self):
+        # Non-Orca file or stripped-trailer file: derive N from the
+        # HEADER_BLOCK's "; total layer number:" line.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 50\r\n"
+            "; max_z_height: 10.0\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+            "; CONFIG_BLOCK_START\r\n"
+            "; layer_height = 0.2\r\n"
+            "; CONFIG_BLOCK_END\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+        assert "; total layers count = 50\r\n" in result
+        assert "; layer_height = 0.2\r\n" in result
+
+    def test_falls_back_to_max_z_div_total_when_no_layer_height_anywhere(self):
+        # No CONFIG_BLOCK layer_height anywhere in the file: compute from
+        # max_z_height / total_layers. 17.20 / 86 = 0.2.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 86\r\n"
+            "; max_z_height: 17.20\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+            "; total layers count = 86\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+        assert "; total layers count = 86\r\n" in result
+        assert "; layer_height = 0.2\r\n" in result
+
+    def test_inserts_both_when_trailer_lives_after_header_end(self):
+        # Same shape as a real Orca file: trailer comes long after
+        # HEADER_BLOCK_END, not before it. Both keys should be inserted
+        # near the head.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 86\r\n"
+            "; max_z_height: 17.20\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+            ";LAYER_CHANGE\r\n"
+            "; total layers count = 86\r\n"
+            "; CONFIG_BLOCK_START\r\n"
+            "; layer_height = 0.2\r\n"
+            "; CONFIG_BLOCK_END\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+
+    def test_idempotent_when_duplicates_already_at_head(self):
+        # Re-running the script on its own output: no second insertion.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; total layer number: 86\r\n"
+            "; max_z_height: 17.20\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "; total layers count = 86\r\n"
+            "; layer_height = 0.2\r\n"
+            "G28\r\n"
+            "; CONFIG_BLOCK_START\r\n"
+            "; layer_height = 0.2\r\n"
+            "; CONFIG_BLOCK_END\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_noop_when_no_header_block_end(self):
+        # Non-Orca file with no HEADER_BLOCK sentinel: nothing to anchor to.
+        gcode = (
+            ";LAYER_COUNT:50\r\n"
+            "G28\r\n"
+            "; layer_height = 0.2\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_noop_when_neither_key_recoverable(self):
+        # HEADER_BLOCK_END exists but no source for either key anywhere.
+        gcode = (
+            "; HEADER_BLOCK_START\r\n"
+            "; HEADER_BLOCK_END\r\n"
+            "G28\r\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 0
+        assert result == gcode
+
+    def test_preserves_eol_style_lf(self):
+        gcode = (
+            "; HEADER_BLOCK_END\n"
+            "G28\n"
+            "; total layers count = 86\n"
+            "; CONFIG_BLOCK_START\n"
+            "; layer_height = 0.2\n"
+            "; CONFIG_BLOCK_END\n"
+        )
+        result, count = duplicate_trailer_keys_at_head(gcode)
+        assert count == 2
+        assert "; total layers count = 86\n" in result
+        assert "; layer_height = 0.2\n" in result
+        assert "\r\n" not in result
 
 
 class TestInjectM155Throttle:
@@ -937,6 +1098,112 @@ class TestMoveFinalNotificationsBeforePrintEnd:
         # Stale notification dropped, second print_end kept
         assert result.count("action:print_end") == 2
         assert result.count("action:notification") == 2  # only the two we inserted
+
+
+class TestThrottleAutoreportsAfterPrintStart:
+    # M154 S0 disables Marlin's position auto-reports (1 Hz X/Y/Z dumps);
+    # M155 reasserts the temperature auto-report interval set earlier.
+    # The pair lands AFTER the initial notification block so the TFT
+    # still sees the time-left / data-left pair first on the wire.
+
+    def test_injects_after_notification_pair(self):
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "M118 P0 A1 action:notification Time Left 01h00m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 0/100\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 2
+        lines = result.splitlines(keepends=True)
+        # Order: print_start, two notifs, then M154 + M155, then G28
+        assert lines[0].endswith("action:print_start\r\n")
+        assert lines[1].startswith("M118 P0 A1 action:notification Time Left")
+        assert lines[2].startswith("M118 P0 A1 action:notification Data Left")
+        assert lines[3] == "M154 S0\r\n"
+        assert lines[4] == "M155 S30\r\n"
+        assert lines[5] == "G28\r\n"
+
+    def test_injects_directly_after_print_start_when_no_notifications(self):
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 2
+        lines = result.splitlines(keepends=True)
+        assert lines[0].endswith("action:print_start\r\n")
+        assert lines[1] == "M154 S0\r\n"
+        assert lines[2] == "M155 S30\r\n"
+        assert lines[3] == "G28\r\n"
+
+    def test_skips_m155_when_interval_zero(self):
+        # Caller disabled M155 injection (M155_INTERVAL_SECONDS = 0):
+        # only M154 S0 is inserted.
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 0)
+        assert count == 1
+        assert "M154 S0\r\n" in result
+        assert "M155" not in result
+
+    def test_idempotent_when_pair_already_present(self):
+        # Re-running the script on its own output: no second injection.
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "M118 P0 A1 action:notification Time Left 01h00m00s\r\n"
+            "M118 P0 A1 action:notification Data Left 0/100\r\n"
+            "M154 S0\r\n"
+            "M155 S30\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 0
+        assert result == gcode
+
+    def test_inserts_only_missing_one(self):
+        # M154 already present, M155 not -- only insert the missing one.
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "M154 S0\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 1
+        assert result.count("M154 S0\r\n") == 1
+        assert "M155 S30\r\n" in result
+
+    def test_noop_when_no_print_start(self):
+        gcode = "G28\r\nM104 S220\r\n"
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 0
+        assert result == gcode
+
+    def test_preserves_eol_lf(self):
+        gcode = (
+            "M118 P0 A1 action:print_start\n"
+            "G28\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 2
+        assert "M154 S0\n" in result
+        assert "M155 S30\n" in result
+        assert "\r\n" not in result
+
+    def test_m154_with_explicit_s0_counts_as_present(self):
+        # Defensive: a slicer or host that emits M154 S0 explicitly
+        # right after print_start should keep the script from
+        # double-injecting.
+        gcode = (
+            "M118 P0 A1 action:print_start\r\n"
+            "M154 S 0\r\n"  # note: space between S and 0
+            "M155 S30\r\n"
+            "G28\r\n"
+        )
+        result, count = throttle_autoreports_after_print_start(gcode, 30)
+        assert count == 0
 
 
 class TestConfigToggles:
