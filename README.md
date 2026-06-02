@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/persano/btt-tft-postprocess/actions/workflows/build-release.yml/badge.svg)](https://github.com/persano/btt-tft-postprocess/actions/workflows/build-release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/persano/btt-tft-postprocess)
 
 If you print via a closed-source remote host — Mintion Beagle camera, ESP3D,
 Pronterface, or anything else that isn't OctoPrint-with-the-BTT-plugin — your
